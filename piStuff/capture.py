@@ -19,7 +19,7 @@ API_KEY = "YOUR_ABUSEIPDB_API_KEY"   # Replace with your actual API key
 # This dictionary will store the baseline: { "192.168.1.5": {"ips": set(), "ja3s": set()} }
 baseline_profile = {}
 banned_devices = set()
-script_start_time = time.time()
+# script_start_time = time.time()
 
 # ==========================================
 # CORE FUNCTIONS
@@ -67,6 +67,8 @@ def isolate_device(source_ip):
 def start_monitoring():
     ja3_blacklist = threat_db.get_threat_database()
     
+    script_start_time = time.time()
+
     print(f"[*] Starting IoT Defender on interface '{NETWORK_INTERFACE}'...")
     print(f"[*] Entering LEARNING PHASE for {LEARNING_DURATION} seconds...")
     tshark_cmd = [
@@ -90,7 +92,7 @@ def start_monitoring():
         "-e", "dhcp.hw.mac_addr", "-e", "dhcp.option.hostname"
     ]   
 
-    process = subprocess.Popen(tshark_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    process = subprocess.Popen(tshark_cmd, stdout=subprocess.PIPE, text=True)
 
     with open(LOG_FILE, 'a') as log_file:
         try:
