@@ -142,7 +142,16 @@ export default function App() {
 
       <main className="workspace">
         <section className="workspace__graph-column">
-          <GraphView devices={devices} selectedId={selectedDeviceId} onSelect={(device) => setSelectedDeviceId(device.id)} />
+          <GraphView
+            devices={devices}
+            selectedDevice={selectedDevice}
+            selectedId={selectedDeviceId}
+            metrics={metrics}
+            metricsLoading={metricsLoading}
+            metricsError={metricsError}
+            onSelect={(device) => setSelectedDeviceId(device.id)}
+            onClearSelection={() => setSelectedDeviceId(null)}
+          />
           <div className="quick-select" aria-label="Quick device selector">
             {devices.map((device) => (
               <button

@@ -27,6 +27,17 @@ interface AdvisoryItem {
 
 const DEVICE_CATALOG: DeviceSeed[] = [
   {
+    id: "cam-garage-02",
+    name: "Garage Cam",
+    type: "security_camera",
+    vendor: "Artemis",
+    model: "Sentinel S2",
+    ip: "192.168.0.21",
+    mac: "00:16:3E:11:22:31",
+    category: "iot",
+    statusPattern: ["good", "good", "suspicious", "good", "good", "blocked"]
+  },
+  {
     id: "cam-garage-01",
     name: "Garage Cam",
     type: "security_camera",

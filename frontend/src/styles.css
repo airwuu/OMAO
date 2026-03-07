@@ -180,6 +180,71 @@ body {
   box-shadow: 0 0 10px currentColor;
 }
 
+.graph-metrics-overlay {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.6rem;
+  z-index: 6;
+  width: min(31vw, 355px);
+  min-width: 275px;
+  padding: 0.5rem;
+}
+
+.graph-metrics-overlay__header {
+  margin-bottom: 0.35rem;
+}
+
+.graph-metrics-overlay__header h3 {
+  margin: 0;
+  font-family: "VT323", monospace;
+  font-size: 1.22rem;
+  line-height: 1;
+  letter-spacing: 0.04em;
+}
+
+.graph-metrics-overlay__header p {
+  margin: 0.2rem 0 0;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-dim);
+}
+
+.graph-mini-metrics-grid {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.graph-mini-metric {
+  border: 1px solid rgba(108, 255, 108, 0.18);
+  background: rgba(1, 10, 1, 0.75);
+  padding: 0.35rem;
+}
+
+.graph-mini-metric__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.25rem;
+}
+
+.graph-mini-metric__header h4 {
+  margin: 0;
+  font-size: 0.69rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.graph-mini-metric__header span {
+  font-size: 0.62rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+
+.graph-mini-metric__chart {
+  height: 88px;
+}
+
 .quick-select {
   margin-top: 0.65rem;
   display: flex;
@@ -422,6 +487,11 @@ body {
 
   .drawer__content {
     max-height: none;
+  }
+
+  .graph-metrics-overlay {
+    width: min(72vw, 360px);
+    min-width: 0;
   }
 }
 

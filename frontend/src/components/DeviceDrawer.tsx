@@ -51,18 +51,6 @@ export function DeviceDrawer({
               <p>Last seen: {new Date(device.lastSeenAt).toLocaleTimeString()}</p>
             </div>
 
-            <section className="metrics-grid" aria-label="Device metrics">
-              {metricsLoading && !metrics ? <p className="muted">Loading telemetry...</p> : null}
-              {metricsError ? <p className="error-text">{metricsError}</p> : null}
-              {metrics ? (
-                <>
-                  <MetricCard title="Latency" unit="ms" data={metrics.latencyMs} stroke="#6CFF6C" />
-                  <MetricCard title="Packet Loss" unit="%" data={metrics.packetLossPct} stroke="#F8F36B" />
-                  <MetricCard title="Block Events" unit="count" data={metrics.blockEvents} stroke="#FF6464" />
-                </>
-              ) : null}
-            </section>
-
             <AdvisoryPanel
               report={advisoryReport}
               loading={advisoryLoading}
