@@ -42,6 +42,13 @@ body {
   animation: jitter 4.5s infinite steps(2, end);
 }
 
+.crt-filter-defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
 .crt-overlay {
   position: fixed;
   inset: 0;
@@ -550,6 +557,13 @@ body {
   .graph-metrics-overlay {
     width: min(72vw, 360px);
     min-width: 0;
+  }
+}
+
+@media (min-width: 1081px) {
+  .crt-app {
+    filter: url("#crt-glass-v2");
+    will-change: filter;
   }
 }
 

@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1200" preserveAspectRatio="none">
+  <defs>
+    <radialGradient id="xField" cx="50%" cy="50%" r="74%">
+      <stop offset="0%" stop-color="rgb(128,128,128)" />
+      <stop offset="64%" stop-color="rgb(128,128,128)" />
+      <stop offset="100%" stop-color="rgb(92,128,128)" />
+    </radialGradient>
+    <radialGradient id="yField" cx="50%" cy="50%" r="74%">
+      <stop offset="0%" stop-color="rgb(128,128,128)" />
+      <stop offset="64%" stop-color="rgb(128,128,128)" />
+      <stop offset="100%" stop-color="rgb(128,92,128)" />
+    </radialGradient>
+    <radialGradient id="screenMask" cx="50%" cy="50%" r="76%">
+      <stop offset="0%" stop-color="black" />
+      <stop offset="72%" stop-color="black" />
+      <stop offset="100%" stop-color="white" />
+    </radialGradient>
+    <mask id="lensArea">
+      <rect width="1200" height="1200" fill="white" />
+      <rect x="56" y="56" width="1088" height="1088" rx="280" fill="url(#screenMask)" />
+    </mask>
+  </defs>
+
+  <rect width="1200" height="1200" fill="rgb(128,128,128)" />
+  <rect width="1200" height="1200" fill="url(#xField)" mask="url(#lensArea)" opacity="0.9" />
+  <rect width="1200" height="1200" fill="url(#yField)" mask="url(#lensArea)" opacity="0.9" />
+</svg>
