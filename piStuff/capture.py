@@ -5,28 +5,17 @@ import time
 import os
 import threat_db
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
-NETWORK_INTERFACE = "wlan0"          # Change to your active interface (e.g., wlp2s0, eth0)
+# config
+NETWORK_INTERFACE = "eth0"          # Change to your active interface (e.g., wlp2s0, eth0)
 LOG_FILE = "tshark_history.json"     # Where raw packets are appended
 LEARNING_DURATION = 10               # Seconds to spend building the baseline before enforcing
-API_KEY = "YOUR_ABUSEIPDB_API_KEY"   # Replace with your actual API key
 
-# ==========================================
-# STATE MANAGEMENT
-# ==========================================
-# This dictionary will store the baseline: { "192.168.1.5": {"ips": set(), "ja3s": set()} }
-baseline_profile = {}
+# state
+baseline_profile = {} # { ip: {dest_ips: set(), fingerprints: set()} }
 banned_devices = set()
-# script_start_time = time.time()
 
-# ==========================================
-# CORE FUNCTIONS
-# ==========================================
-
+# adds normal behavior to device profile during learning phase 
 def update_baseline(src_ip, dst_ip, ja3):
-    """Adds normal behavior to the device's profile during the Learning Phase."""
     if src_ip not in baseline_profile:
         baseline_profile[src_ip] = {"ips": set(), "ja3s": set()}
     
@@ -42,8 +31,8 @@ def check_threat_intel(ip_address, ja3_hash, ja3_db):
     print(f"- JA3 is clean. Checking IP: {ip_address}")
     return False
 
+# kill switch
 def isolate_device(source_ip):
-    """The Automated Remediation / Kill Switch."""
     if source_ip in banned_devices:
         return # Already banned, prevent spamming iptables
         
@@ -60,10 +49,8 @@ def isolate_device(source_ip):
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] Failed to execute iptables: {e}")
 
-# ==========================================
-# MAIN LOOP
-# ==========================================
-
+# ---------------------------------------------------
+# main loop 
 def start_monitoring():
     ja3_blacklist = threat_db.get_threat_database()
     
@@ -73,21 +60,11 @@ def start_monitoring():
     print(f"[*] Entering LEARNING PHASE for {LEARNING_DURATION} seconds...")
     tshark_cmd = [
         "tshark", "-l", "-i", NETWORK_INTERFACE, 
-        "-T", "ek", # Output as newline-delimited JSON
-
-        # 1. The Core Identifiers (What type of packet is this?)
+        "-T", "ek",
         "-e", "frame.protocols", 
-
-        # 2. Hardware / MAC Layer (Who is talking locally?)
         "-e", "eth.src", "-e", "eth.dst", 
-
-        # 3. Network / IP Layer (Where are they going?)
         "-e", "ip.src", "-e", "ip.dst", 
-
-        # 4. Transport Layer (What port are they using?)
         "-e", "tcp.dstport", "-e", "udp.dstport",
-
-        # 5. Application Layer / Fingerprinting (The good stuff)
         "-e", "tls.handshake.ja3",
         "-e", "dhcp.hw.mac_addr", "-e", "dhcp.option.hostname"
     ]   
@@ -128,7 +105,6 @@ def start_monitoring():
                         # We are now ENFORCING the baseline
                         if elapsed_time - LEARNING_DURATION < 1:
                             print("\n\n[*] LEARNING PHASE COMPLETE. ENTERING ACTIVE MONITORING.[*]\n")
-                            # Hackathon trick: Sleep for 1 sec so this banner doesn't print multiple times
                             time.sleep(1) 
                             
                         # Check if the device is doing something new
@@ -155,7 +131,6 @@ def start_monitoring():
             process.terminate()
 
 if __name__ == "__main__":
-    # Ensure script is run with sudo for Tshark and iptables permissions
     if os.geteuid() != 0:
         print("[!] ERROR: This script must be run as root (sudo).")
         exit(1)
