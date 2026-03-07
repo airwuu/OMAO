@@ -33,32 +33,13 @@ def update_baseline(src_ip, dst_ip, ja3):
     baseline_profile[src_ip]["ips"].add(dst_ip)
     baseline_profile[src_ip]["ja3s"].add(ja3)
 
-def check_threat_intel(ip_address, ja3_hash):
-    """Queries an external threat intelligence database."""
-    print(f"[!] ANOMALY DETECTED! Checking Threat Intel for IP: {ip_address}")
-    
-    url = 'https://api.abuseipdb.com/api/v2/check'
-    querystring = {'ipAddress': ip_address, 'maxAgeInDays': '90'}
-    headers = {'Accept': 'application/json', 'Key': API_KEY}
-    
-    try:
-        # UNCOMMENT BELOW TO ACTIVATE REAL API CALLS
-        # response = requests.request(method='GET', url=url, headers=headers, params=querystring)
-        # if response.status_code == 200:
-        #     result = response.json()
-        #     score = result['data']['abuseConfidenceScore']
-        #     print(f"[*] Threat Score for {ip_address}: {score}/100")
-        #     if score > 50:
-        #         return True 
-        
-        # MOCK LOGIC FOR HACKATHON DEMO (Triggers if testing with a specific IP)
-        if ip_address == "93.184.216.34": # Example IP (example.com) to test the kill switch
-            print(f"[*] Threat Score for {ip_address}: 100/100 (MOCK)")
-            return True
-            
-    except Exception as e:
-        print(f"[ERROR] API Request Failed: {e}")
-        
+# checks abuse.ch database
+def check_threat_intel(ip_address, ja3_hash, ja3_db):    
+    is_bad_ja3 = threat_db.analyze_fingerprint(ja3_hash, ja3_db)
+    if is_bad_ja3:
+        return True
+
+    print(f"- JA3 is clean. Checking IP: {ip_address}")
     return False
 
 def isolate_device(source_ip):
@@ -84,6 +65,8 @@ def isolate_device(source_ip):
 # ==========================================
 
 def start_monitoring():
+    ja3_blacklist = threat_db.get_threat_database()
+    
     print(f"[*] Starting IoT Defender on interface '{NETWORK_INTERFACE}'...")
     print(f"[*] Entering LEARNING PHASE for {LEARNING_DURATION} seconds...")
     tshark_cmd = [
@@ -155,7 +138,7 @@ def start_monitoring():
                         if is_new_ip or is_new_ja3:
                             print(f"\n[*] Deviation detected for {src_ip} -> {dst_ip} [JA3: {ja3}]")
                             
-                            is_malicious = check_threat_intel(dst_ip, ja3)
+                            is_malicious = check_threat_intel(dst_ip, ja3, ja3_blacklist)
                             if is_malicious:
                                 isolate_device(src_ip)
                             else:
