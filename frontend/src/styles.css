@@ -12,6 +12,11 @@
   --glow-good: rgba(108, 255, 108, 0.55);
   --layout-columns: 5;
   --layout-gap: 0.7rem;
+  --crt-overlay-opacity: 0.72;
+  --crt-line-dark: rgba(0, 0, 0, 0.58);
+  --crt-line-light: rgba(108, 255, 108, 0.12);
+  --crt-line-gap: 4px;
+  --crt-sweep-duration: 6s;
 }
 
 * {
@@ -41,17 +46,70 @@ body {
   position: fixed;
   inset: 0;
   pointer-events: none;
+  overflow: hidden;
   background:
     repeating-linear-gradient(
       to bottom,
-      rgba(0, 0, 0, 0.24) 0,
-      rgba(0, 0, 0, 0.24) 1px,
-      transparent 1px,
-      transparent 3px
+      var(--crt-line-dark) 0,
+      var(--crt-line-dark) 1px,
+      var(--crt-line-light) 1px,
+      var(--crt-line-light) 2px,
+      transparent 2px,
+      transparent var(--crt-line-gap)
+    ),
+    linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.04) 0%,
+      rgba(255, 255, 255, 0.14) 48%,
+      rgba(255, 255, 255, 0.04) 100%
     );
+  background-size:
+    100% var(--crt-line-gap),
+    100% 220px;
+  mix-blend-mode: soft-light;
+  opacity: var(--crt-overlay-opacity);
+  z-index: 10;
+  animation:
+    scanlinesDown var(--crt-sweep-duration) linear infinite,
+    scanlineFlicker 1.8s steps(2, end) infinite;
+}
+
+.crt-overlay::before,
+.crt-overlay::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.crt-overlay::before {
+  top: -28vh;
+  bottom: auto;
+  height: 26vh;
+  background: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(196, 255, 196, 0.2) 44%,
+    rgba(223, 255, 223, 0.34) 50%,
+    rgba(196, 255, 196, 0.15) 58%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  mix-blend-mode: screen;
+  opacity: 0.58;
+  animation: scanSweep var(--crt-sweep-duration) linear infinite;
+}
+
+.crt-overlay::after {
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.035) 0,
+    rgba(255, 255, 255, 0.035) 1px,
+    transparent 1px,
+    transparent 2px
+  );
   mix-blend-mode: soft-light;
   opacity: 0.45;
-  z-index: 10;
+  animation: scanlineTextureDown 10s linear infinite reverse;
 }
 
 .app-header {
@@ -495,6 +553,19 @@ body {
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .crt-app,
+  .crt-overlay,
+  .crt-overlay::before,
+  .crt-overlay::after {
+    animation: none;
+  }
+
+  .crt-overlay::before {
+    display: none;
+  }
+}
+
 @keyframes jitter {
   0%,
   100% {
@@ -508,5 +579,49 @@ body {
   }
   75% {
     transform: translate(0.2px, 0.3px);
+  }
+}
+
+@keyframes scanlinesDown {
+  0% {
+    background-position:
+      0 0,
+      0 0;
+  }
+  100% {
+    background-position:
+      0 var(--crt-line-gap),
+      0 220px;
+  }
+}
+
+@keyframes scanlineFlicker {
+  0%,
+  100% {
+    opacity: var(--crt-overlay-opacity);
+  }
+  40% {
+    opacity: calc(var(--crt-overlay-opacity) - 0.06);
+  }
+  65% {
+    opacity: calc(var(--crt-overlay-opacity) - 0.1);
+  }
+}
+
+@keyframes scanlineTextureDown {
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: 0 2px;
+  }
+}
+
+@keyframes scanSweep {
+  0% {
+    transform: translateY(0);
+  }
+  100% {
+    transform: translateY(160vh);
   }
 }
