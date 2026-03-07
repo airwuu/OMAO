@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ForceGraph2D from "react-force-graph-2d";
 import type { Device } from "../types";
-import { buildGraphData, type GraphNode } from "../utils/graph";
+import { buildGraphData, syncGraphData, type GraphData, type GraphNode } from "../utils/graph";
 import { STATUS_META } from "../utils/status";
 
 interface GraphViewProps {
@@ -24,7 +24,11 @@ export function GraphView({ devices, selectedId, onSelect }: GraphViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const graphRef = useRef<any>(null);
   const [size, setSize] = useState<GraphSize>(INITIAL_SIZE);
-  const graphData = useMemo(() => buildGraphData(devices), [devices]);
+  const [graphData, setGraphData] = useState<GraphData>(() => buildGraphData(devices));
+
+  useEffect(() => {
+    setGraphData((current) => syncGraphData(current, devices));
+  }, [devices]);
 
   useEffect(() => {
     const target = containerRef.current;
@@ -53,11 +57,11 @@ export function GraphView({ devices, selectedId, onSelect }: GraphViewProps) {
       return;
     }
 
-    graphRef.current.d3Force("charge").strength(-180);
-    graphRef.current.d3Force("link").distance(140);
+    graphRef.current.d3Force("charge").strength(-30);
+    graphRef.current.d3Force("link").distance(1);
 
     const timeoutId = window.setTimeout(() => {
-      graphRef.current?.zoomToFit(500, 30);
+      graphRef.current?.zoomToFit(500, 45);
     }, 350);
 
     return () => window.clearTimeout(timeoutId);
@@ -80,7 +84,7 @@ export function GraphView({ devices, selectedId, onSelect }: GraphViewProps) {
           backgroundColor="transparent"
           linkColor={() => "rgba(108, 255, 108, 0.25)"}
           linkWidth={1}
-          cooldownTicks={80}
+          cooldownTicks={5}
           nodeRelSize={6}
           onNodeClick={(node) => {
             const typedNode = node as GraphNode;
