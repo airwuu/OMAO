@@ -3,6 +3,7 @@ import json
 import requests
 import time
 import os
+import threat_db
 
 # ==========================================
 # CONFIGURATION
