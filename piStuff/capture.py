@@ -9,9 +9,25 @@ import threat_db
 NETWORK_INTERFACE = "wlan0"          # Change to your active interface (e.g., wlp2s0, eth0)
 LOG_FILE = "tshark_history.json"     # Where raw packets are appended
 LEARNING_DURATION = 10               # Seconds to spend building the baseline before enforcing
+BASELINE_FILE = "network_baseline.json"
+
+def load_baseline():
+    if os.path.exists(BASELINE_FILE):
+        try:
+            with open(BASELINE_FILE, 'r') as f:
+                data = json.load(f)
+                return {ip: {"ips": set(v["ips"]), "ja3s": set(v["ja3s"])} for ip, v in data.items()}
+        except Exception as e:
+            print(f"[!] Error loading baseline: {e}")
+    return {}
+
+def save_baseline():
+    serializable = {ip: {"ips": list(v["ips"]), "ja3s": list(v["ja3s"])} for ip, v in baseline_profile.items()}
+    with open(BASELINE_FILE, 'w') as f:
+        json.dump(serializable, f, indent=4)
 
 # state
-baseline_profile = {} # { ip: {dest_ips: set(), fingerprints: set()} }
+baseline_profile = load_baseline() # { ip: {dest_ips: set(), fingerprints: set()} }
 banned_devices = set()
 
 # adds normal behavior to device profile during learning phase 
@@ -19,8 +35,16 @@ def update_baseline(src_ip, dst_ip, ja3):
     if src_ip not in baseline_profile:
         baseline_profile[src_ip] = {"ips": set(), "ja3s": set()}
     
-    baseline_profile[src_ip]["ips"].add(dst_ip)
-    baseline_profile[src_ip]["ja3s"].add(ja3)
+    is_new = False
+    if dst_ip not in baseline_profile[src_ip]["ips"]:
+        baseline_profile[src_ip]["ips"].add(dst_ip)
+        is_new = True
+    if ja3 and ja3 not in baseline_profile[src_ip]["ja3s"]:
+        baseline_profile[src_ip]["ja3s"].add(ja3)
+        is_new = True
+    
+    if is_new:
+        save_baseline()
 
 # checks abuse.ch database
 def check_threat_intel(ip_address, ja3_hash, ja3_db):    
@@ -136,7 +160,7 @@ def start_monitoring():
                 if elapsed < LEARNING_DURATION:
                     update_baseline(src, dst, ja3)
                     if ja3:
-                        print(f"\nLearning fingerprint: {ja3[:10]}... (from {src})", end="", flush=True)
+                        print(f"\nLearning fingerprint: {ja3[:10]} from {src}", end="", flush=True)
                     else:
                         print(".", end="", flush=True) 
                 else:
