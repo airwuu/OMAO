@@ -85,6 +85,11 @@ device_registry_lock = threading.Lock()
 traffic_counters: dict[str, dict[str, int]] = {}
 traffic_counters_lock = threading.Lock()
 
+# Traffic analysis trackers
+traffic_short_term: dict[str, dict[str, int]] = {}
+traffic_long_term: dict[str, dict[str, int]] = {}
+traffic_analysis_lock = threading.Lock()
+
 # Initialize the vendor lookup tool globally
 vendor_scanner = MacLookup() 
 
@@ -327,7 +332,9 @@ class SupabaseWriter:
             "mac": mac_addr,
             "device_category": "iot",
             "last_seen_at": timestamp,
-            "status": status
+            "status": status,
+            # We don't overwrite traffic_baseline or avg_pkts_per_sec here, 
+            # they are updated in the anomaly_analysis_worker.
         }]
 
         self._post(
@@ -352,6 +359,22 @@ class SupabaseWriter:
             f"/rest/v1/{self.encoded_metrics_table}",
             metric_row,
             "return=minimal"
+        )
+
+
+    def update_device_baseline(self, device_id, baseline_dict, avg_pkts):
+        # Dedicated method to update just the learned baseline fields
+        payload = [{
+            "id": device_id,
+            "traffic_baseline": baseline_dict,
+            "avg_pkts_per_sec": round(float(avg_pkts), 2)
+        }]
+        
+        # Merge duplicates minimal return updates existing rows based on the id
+        self._post(
+            f"/rest/v1/{self.encoded_devices_table}?on_conflict=id",
+            payload,
+            "resolution=merge-duplicates,return=minimal"
         )
 
 
@@ -439,7 +462,7 @@ def mark_disconnected_devices():
     return disconnected_snapshots
 
 
-def record_network_activity(src_mac, dst_mac, frame_bytes):
+def record_traffic_destination(src_mac, dst_mac, dst_ip, frame_bytes):
     if frame_bytes <= 0:
         return
 
@@ -452,6 +475,7 @@ def record_network_activity(src_mac, dst_mac, frame_bytes):
     if not tracked_src and not tracked_dst:
         return
 
+    # Update generic traffic counters (upload/download volume)
     with traffic_counters_lock:
         if tracked_src:
             src_counter = traffic_counters.setdefault(src_mac, {"upload_bytes": 0, "download_bytes": 0})
@@ -460,6 +484,13 @@ def record_network_activity(src_mac, dst_mac, frame_bytes):
         if tracked_dst:
             dst_counter = traffic_counters.setdefault(dst_mac, {"upload_bytes": 0, "download_bytes": 0})
             dst_counter["download_bytes"] += frame_bytes
+
+    # Track distinct IP destinations for anomaly detection
+    with traffic_analysis_lock:
+        # Only tracking outbound behavior (what the device reaches out to)
+        if tracked_src and dst_ip and dst_ip != "0.0.0.0":
+            src_ips = traffic_short_term.setdefault(src_mac, {})
+            src_ips[dst_ip] = src_ips.get(dst_ip, 0) + 1
 
 
 def consume_network_activity(mac_addr):
@@ -566,11 +597,12 @@ def metrics_worker(stop_event, supabase_writer):
 
 def network_activity_worker(stop_event):
     tshark_cmd = [
-        "tshark", "-l", "-i", NETWORK_INTERFACE,
+        "tshark", "-l", "-p", "-i", NETWORK_INTERFACE,
         "-T", "ek",
         "-f", "ip",
         "-e", "eth.src",
         "-e", "eth.dst",
+        "-e", "ip.dst",
         "-e", "frame.len"
     ]
 
@@ -601,18 +633,181 @@ def network_activity_worker(stop_event):
 
             src_mac = first_value(layers, "eth_src")
             dst_mac = first_value(layers, "eth_dst")
+            dst_ip = normalize_ip(first_value(layers, "ip_dst"))
             frame_len = parse_integer(first_value(layers, "frame_len", "frame_cap_len", "frame_frame_len"))
 
             if not src_mac or not dst_mac or frame_len is None:
                 continue
 
-            record_network_activity(normalize_mac(src_mac), normalize_mac(dst_mac), frame_len)
+            record_traffic_destination(normalize_mac(src_mac), normalize_mac(dst_mac), dst_ip, frame_len)
     finally:
         process.terminate()
         try:
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
             process.kill()
+
+
+def handle_anomaly(mac_addr, hostname, ip_addr, reason, supabase_writer):
+    print("\n" + "!" * 50)
+    print("[!!!] ANOMALY DETECTED [!!!]")
+    print(f"    MAC Address: {mac_addr}")
+    print(f"    Hostname:    {hostname}")
+    print(f"    IP Address:  {ip_addr}")
+    print(f"    Reason:      {reason}")
+    print("!" * 50)
+
+    # 1. Isolate the device immediately
+    isolate_device(mac_addr)
+
+    # 2. Update local registry to reflect blocked status
+    snapshot = upsert_registry_on_presence(mac_addr, hostname, ip_addr, True)
+
+    # 3. Update Supabase
+    try:
+        supabase_writer.upsert_device(
+            str(snapshot["id"]),
+            mac_addr,
+            str(snapshot["name"]),
+            str(snapshot["ip"]),
+            "blocked"
+        )
+        supabase_writer.insert_metric(str(snapshot["id"]), 0.0, 0.0, 1, 0.0)
+    except Exception as error:
+        print(f"[!] Supabase anomaly update failed for {mac_addr}: {error}")
+
+
+def anomaly_analysis_worker(stop_event, supabase_writer):
+    # Analyzing every 1 minute
+    ANOMALY_CHECK_INTERVAL_SEC = 60.0
+    
+    # Simple EWMA learning factor for the "1 hour" baseline.
+    # We update every 1 min, so 60 updates per hour. Alpha = 1/60 ~ 0.016
+    ALPHA = 0.016
+
+    while not stop_event.wait(ANOMALY_CHECK_INTERVAL_SEC):
+        # 1. Extract short term data and clear it to start fresh for the next minute
+        with traffic_analysis_lock:
+            current_short_term = traffic_short_term.copy()
+            traffic_short_term.clear()
+
+        # 2. Extract current device information
+        with device_registry_lock:
+            snapshots = {
+                mac: dict(state)
+                for mac, state in device_registry.items()
+            }
+
+        # 3. Process each device that had traffic in the last minute
+        for mac_addr, short_term_ips in current_short_term.items():
+            snapshot = snapshots.get(mac_addr)
+            if not snapshot:
+                continue
+
+            # If device is already blocked, skip analysis
+            if snapshot.get("status") == "blocked":
+                continue
+
+            device_id = str(snapshot["id"])
+            hostname = str(snapshot["name"])
+            ip_addr = str(snapshot["ip"])
+            
+            # Calculate short term total packets
+            st_total_pkts = sum(short_term_ips.values())
+            if st_total_pkts == 0:
+                continue
+                
+            st_pkts_per_sec = st_total_pkts / ANOMALY_CHECK_INTERVAL_SEC
+
+            # Safely get or initialize long term baseline for this MAC
+            with traffic_analysis_lock:
+                # long_term stores: {"avg_pkts_per_sec": float, "ips": {"ip": percentage(0-1)}}
+                lt_data = traffic_long_term.setdefault(mac_addr, {
+                    "avg_pkts_per_sec": st_pkts_per_sec, # Initialize with current if empty
+                    "ips": {},
+                    "updates_count": 0
+                })
+                
+                lt_avg_pkts_per_sec = lt_data["avg_pkts_per_sec"]
+                lt_ips = lt_data["ips"]
+                updates_count = lt_data["updates_count"]
+
+            # --- Anomaly Detection Logic ---
+            is_anomalous = False
+            reason = ""
+
+            # Only run anomaly rules if we have built a decent baseline (e.g., at least 5 minutes)
+            if updates_count >= 5:
+                # Rule 1: Volume Spike (>300% increase over baseline)
+                # Ignore very small baselines to avoid false positives on quiet devices
+                if lt_avg_pkts_per_sec > 1.0 and st_pkts_per_sec > (lt_avg_pkts_per_sec * 3.0):
+                    is_anomalous = True
+                    reason = f"Volume spike: {st_pkts_per_sec:.1f} pkts/s (baseline: {lt_avg_pkts_per_sec:.1f} pkts/s)"
+                
+                # Rule 2: Destination IP Distribution Shifts
+                if not is_anomalous:
+                    st_distribution = {ip: count / st_total_pkts for ip, count in short_term_ips.items()}
+                    for ip, st_percentage in st_distribution.items():
+                        lt_percentage = lt_ips.get(ip, 0.0)
+                        
+                        # New IP or massively increased percentage
+                        # E.g., if it was < 1% historically, but is now > 20% of traffic
+                        if lt_percentage < 0.01 and st_percentage > 0.20:
+                            # And must be a meaningful amount of packets (e.g. > 10 pkts)
+                            if short_term_ips[ip] > 10:
+                                is_anomalous = True
+                                reason = f"Abnormal connection to {ip} ({st_percentage*100:.1f}% of traffic, baseline {lt_percentage*100:.1f}%)"
+                                break
+                        
+                        # Existing IP ratio suddenly spiked severely (e.g. from <10% to >50%)
+                        if lt_percentage < 0.10 and st_percentage > 0.50:
+                            if short_term_ips[ip] > 20: # Require even more packets to flag existing IPs
+                                is_anomalous = True
+                                reason = f"Ratio spike to {ip} ({st_percentage*100:.1f}% of traffic, baseline {lt_percentage*100:.1f}%)"
+                                break
+
+            # --- Trigger Alert ---
+            if is_anomalous:
+                handle_anomaly(mac_addr, hostname, ip_addr, reason, supabase_writer)
+                # Skip baseline learning if anomalous
+                continue
+
+            # --- Baseline Learning (EWMA) ---
+            # Re-calculate short term distribution
+            st_distribution = {ip: count / st_total_pkts for ip, count in short_term_ips.items()}
+            
+            with traffic_analysis_lock:
+                # Update rolling average for packets per second
+                new_avg_pkts = (ALPHA * st_pkts_per_sec) + ((1 - ALPHA) * lt_data["avg_pkts_per_sec"])
+                lt_data["avg_pkts_per_sec"] = new_avg_pkts
+                
+                # Update rolling average for IP distributions
+                # First, decay all existing IPs
+                for ip in lt_data["ips"]:
+                    lt_data["ips"][ip] = lt_data["ips"][ip] * (1 - ALPHA)
+                
+                # Then add the current minute's contribution
+                for ip, st_pct in st_distribution.items():
+                    current = lt_data["ips"].get(ip, 0.0)
+                    lt_data["ips"][ip] = current + (ALPHA * st_pct)
+                    
+                # Normalize just to handle any tiny floating point drifts over time
+                total_lt_pct = sum(lt_data["ips"].values())
+                if total_lt_pct > 0:
+                    for ip in lt_data["ips"]:
+                        lt_data["ips"][ip] /= total_lt_pct
+                        
+                lt_data["updates_count"] += 1
+                
+                # Snapshot for Supabase update
+                baseline_to_save = dict(lt_data["ips"])
+                avg_to_save = lt_data["avg_pkts_per_sec"]
+
+            # Periodically (or on every update with small scale) sync baseline to Supabase
+            try:
+                supabase_writer.update_device_baseline(device_id, baseline_to_save, avg_to_save)
+            except Exception as error:
+                print(f"[!] Supabase baseline update failed for {mac_addr}: {error}")
 
 
 def disconnect_worker(stop_event, supabase_writer):
@@ -706,7 +901,7 @@ def start_monitoring(supabase_writer):
     print("[*] Network activity capture: enabled (per-device kbps)")
 
     tshark_cmd = [
-        "tshark", "-l", "-i", NETWORK_INTERFACE,
+        "tshark", "-l", "-p", "-i", NETWORK_INTERFACE,
         "-T", "ek",
         "-f", "udp port 67 or udp port 68 or tcp port 443", 
         "-e", "dhcp.option.dhcp",
@@ -739,6 +934,11 @@ def start_monitoring(supabase_writer):
         args=(stop_event,),
         daemon=True
     )
+    anomaly_thread = threading.Thread(
+        target=anomaly_analysis_worker,
+        args=(stop_event, supabase_writer),
+        daemon=True
+    )
     disconnect_thread = threading.Thread(
         target=disconnect_worker,
         args=(stop_event, supabase_writer),
@@ -746,6 +946,7 @@ def start_monitoring(supabase_writer):
     )
     metrics_thread.start()
     traffic_thread.start()
+    anomaly_thread.start()
     disconnect_thread.start()
 
     with open(LOG_FILE, "a", encoding="utf-8") as log_file:
@@ -823,6 +1024,7 @@ def start_monitoring(supabase_writer):
 
             metrics_thread.join(timeout=2)
             traffic_thread.join(timeout=2)
+            anomaly_thread.join(timeout=2)
             disconnect_thread.join(timeout=2)
 
 
