@@ -709,6 +709,7 @@ def start_monitoring(supabase_writer):
         "tshark", "-l", "-i", NETWORK_INTERFACE,
         "-T", "ek",
         "-f", "udp port 67 or udp port 68 or tcp port 443", 
+        "-e", "dhcp.option.dhcp",
         "-e", "dhcp.hw.mac_addr",
         "-e", "dhcp.option.hostname",
         "-e", "tls.handshake.ja3", 
