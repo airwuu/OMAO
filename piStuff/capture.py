@@ -1,181 +1,118 @@
 import subprocess
 import json
-import requests
-import time
 import os
-import threat_db
+import sys
+import time
 
-# config
-NETWORK_INTERFACE = "wlan0"          # Change to your active interface (e.g., wlp2s0, eth0)
-LOG_FILE = "tshark_history.json"     # Where raw packets are appended
-LEARNING_DURATION = 10               # Seconds to spend building the baseline before enforcing
-BASELINE_FILE = "network_baseline.json"
+# --- CONFIGURATION ---
+NETWORK_INTERFACE = "eth0"  # Change to your interface (e.g., wlan0, enp0s3)
+LOG_FILE = "iot_defender_dhcp.log"
 
-def load_baseline():
-    if os.path.exists(BASELINE_FILE):
-        try:
-            with open(BASELINE_FILE, 'r') as f:
-                data = json.load(f)
-                return {ip: {"ips": set(v["ips"]), "ja3s": set(v["ja3s"])} for ip, v in data.items()}
-        except Exception as e:
-            print(f"[!] Error loading baseline: {e}")
-    return {}
+# Track MAC addresses seen in this session to avoid duplicate alerts
+devices_seen = set()
 
-def save_baseline():
-    serializable = {ip: {"ips": list(v["ips"]), "ja3s": list(v["ja3s"])} for ip, v in baseline_profile.items()}
-    with open(BASELINE_FILE, 'w') as f:
-        json.dump(serializable, f, indent=4)
+def check_threat_intel(mac_addr, hostname):
+    """
+    Placeholder: Check if the device's MAC or Hostname is suspicious.
+    """
+    print(f"[*] Analyzing {hostname} ({mac_addr}) against threat database...")
+    # Add your API calls or local blacklist checks here
+    return False 
 
-# state
-baseline_profile = load_baseline() # { ip: {dest_ips: set(), fingerprints: set()} }
-banned_devices = set()
+def isolate_device(mac_addr):
+    """
+    Placeholder: Block the device using iptables or another method.
+    """
+    print(f"[!] ACTION TAKEN: Isolating device {mac_addr} from network.")
+    # Example: os.system(f"iptables -A FORWARD -m mac --mac-source {mac_addr} -j DROP")
 
-# adds normal behavior to device profile during learning phase 
-def update_baseline(src_ip, dst_ip, ja3):
-    if src_ip not in baseline_profile:
-        baseline_profile[src_ip] = {"ips": set(), "ja3s": set()}
+def handle_new_device(mac_addr, hostname):
+    """
+    The core logic triggered when a DHCP join is detected.
+    """
+    if mac_addr in devices_seen:
+        return # Skip if we've already handled this device this session
     
-    is_new = False
-    if dst_ip not in baseline_profile[src_ip]["ips"]:
-        baseline_profile[src_ip]["ips"].add(dst_ip)
-        is_new = True
-    if ja3 and ja3 not in baseline_profile[src_ip]["ja3s"]:
-        baseline_profile[src_ip]["ja3s"].add(ja3)
-        is_new = True
-    
-    if is_new:
-        save_baseline()
+    devices_seen.add(mac_addr)
+    print("\n" + "="*50)
+    print(f"[!] NEW DEVICE JOINED THE NETWORK")
+    print(f"    MAC Address: {mac_addr}")
+    print(f"    Hostname:    {hostname}")
+    print("="*50)
 
-# checks abuse.ch database
-def check_threat_intel(ip_address, ja3_hash, ja3_db):    
-    is_bad_ja3 = threat_db.analyze_fingerprint(ja3_hash, ja3_db)
-    if is_bad_ja3:
-        return True
+    is_malicious = check_threat_intel(mac_addr, hostname)
+    if is_malicious:
+        isolate_device(mac_addr)
+    else:
+        print(f"[*] Device {mac_addr} allowed for now.")
 
-    print(f"[*] Checking IP: {ip_address}")
-    return False
-
-# kill switch
-def isolate_device(source_ip):
-    if source_ip in banned_devices:
-        return 
-        
-    print(f"\n[!] Dropping all traffic from {source_ip}")
-    
-    try:
-        subprocess.run(["sudo", "iptables", "-A", "FORWARD", "-s", source_ip, "-j", "DROP"], check=True)
-        subprocess.run(["sudo", "iptables", "-A", "FORWARD", "-d", source_ip, "-j", "DROP"], check=True)
-        
-        banned_devices.add(source_ip)
-        print(f"[-] {source_ip} has been successfully isolated from the network.")
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Failed to execute iptables: {e}")
-
-# ---------------------------------------------------
-# extracts src, dst, and ja3 from tshark JSON
-def parse_packet(line):
-    try:
-        data = json.loads(line)
-        layers = data.get("layers", {})
-
-        src = layers.get("ip_src", [None])[0]
-        dst = layers.get("ip_dst", [None])[0]
-        ja3 = layers.get("tls_handshake_ja3", [None])[0]
-
-        return src, dst, ja3
-    except:
-        return None, None, None
-
-# checks deviations 
-def process_threat(src, dst, ja3, database):
-    if src in banned_devices:
-            return
-
-    prof = baseline_profile.get(src, {"ips": set(), "ja3s": set()})
-    
-    if dst not in prof["ips"] or ja3 not in prof["ja3s"]:
-        print(f"\n[*] New Signature: {src} -> {dst}")
-        
-        if check_threat_intel(dst, ja3, database):
-            isolate_device(src)
-        else:
-            print(f"[*] Signature verified benign.")
-            update_baseline(src, dst, ja3)
-
-# main loop
 def start_monitoring():
-    db = threat_db.get_threat_database()
-    script_start_time = time.time()
-    last_tick = script_start_time
-    active_alert_shown = False
+    print(f"[*] Starting IoT Defender on interface '{NETWORK_INTERFACE}'...")
+    print(f"[*] Filtering for DHCP Discover/Request (New Joins)...")
 
-    cmd = [
+    # Tshark command focused specifically on DHCP handshake packets
+    tshark_cmd = [
         "tshark", "-l", "-i", NETWORK_INTERFACE, 
         "-T", "ek",
-        "-e", "frame.protocols", 
-        "-e", "eth.src", "-e", "eth.dst", 
-        "-e", "ip.src", "-e", "ip.dst", 
-        "-e", "tcp.dstport", "-e", "udp.dstport",
-        "-e", "tls.handshake.ja3",
-        "-e", "dhcp.hw.mac_addr", "-e", "dhcp.option.hostname"
+        "-f", "udp port 67 or udp port 68", # BPF filter for speed
+        "-e", "dhcp.option.dhcp",           # Type (1=Discover, 3=Request)
+        "-e", "dhcp.hw.mac_addr",          # MAC of the device
+        "-e", "dhcp.option.hostname"        # Hostname of the device
     ]   
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
 
-    print("")
-    print(f"[*] Monitoring {NETWORK_INTERFACE}...")
-
-    print("")
-    print(f"[*] Learning phase: {LEARNING_DURATION}s remaining...")
+    # Start tshark process
+    process = subprocess.Popen(
+        tshark_cmd, 
+        stdout=subprocess.PIPE, 
+        stderr=subprocess.DEVNULL, 
+        text=True
+    )
 
     with open(LOG_FILE, 'a') as log_file:
         try:
-            while True:
-                try:
-                    line = process.stdout.readline()
-                except IOError:
-                    line = None
-                current_time = time.time()
-                elapsed = current_time - script_start_time
-
-                if elapsed < LEARNING_DURATION:
-                    if current_time - last_tick >= 1:
-                        remaining = int(LEARNING_DURATION - elapsed)
-                        print(f"[*] Learning phase {int(LEARNING_DURATION - elapsed)}s remaining...", flush=True)
-                        last_tick = current_time
-                elif not active_alert_shown:
-                    print(f"\n\n{'='*40}")
-                    print("[*] Monitoring active.")
-                    print(f"{'='*40}\n")
-                    active_alert_shown = True
-              
-                if line.strip().isdigit():
-                    continue
-
+            for line in process.stdout:
+                # 1. Log the raw JSON to a file
                 log_file.write(line)
-                src, dst, ja3 = parse_packet(line)
-                
-                if not src or not dst:
-                    continue
+                log_file.flush()
 
-                if elapsed < LEARNING_DURATION:
-                    update_baseline(src, dst, ja3)
-                    if ja3:
-                        print(f"\nLearning fingerprint: {ja3[:10]} from {src}", end="", flush=True)
-                    else:
-                        print(".", end="", flush=True) 
-                else:
-                    if ja3:
-                        process_threat(src, dst, ja3, db)
-                    else: 
-                        pass
+                try:
+                    data = json.loads(line)
+                    if "layers" not in data:
+                        continue
+                    
+                    layers = data["layers"]
+                    
+                    # Extract DHCP specific fields
+                    # Tshark 'ek' format uses underscores in keys
+                    msg_types = layers.get("dhcp_option_dhcp", [])
+                    mac_addrs = layers.get("dhcp_hw_mac_addr", [])
+                    hostnames = layers.get("dhcp_option_hostname", ["Unknown"])
+
+                    if msg_types and mac_addrs:
+                        msg_type = msg_types[0]
+                        mac_addr = mac_addrs[0]
+                        hostname = hostnames[0]
+
+                        # Trigger on DHCP Discover (1) or Request (3)
+                        if msg_type in ["1", "3"]:
+                            handle_new_device(mac_addr, hostname)
+
+                except json.JSONDecodeError:
+                    continue 
 
         except KeyboardInterrupt:
-            print("\n[*] Stopping...")
+            print("\n[*] Shutting down IoT Defender...")
             process.terminate()
-            
+
 if __name__ == "__main__":
+    # Check for Root
     if os.geteuid() != 0:
-        print("[!] ERROR: This script must be run as root (sudo).")
-        exit(1)
+        print("[!] ERROR: This script must be run as root (sudo) to capture packets.")
+        sys.exit(1)
+
+    # Basic check to see if Tshark is installed
+    if subprocess.call(["which", "tshark"], stdout=subprocess.DEVNULL) != 0:
+        print("[!] ERROR: Tshark is not installed. Please install it (sudo apt install tshark).")
+        sys.exit(1)
         
     start_monitoring()
