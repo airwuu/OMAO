@@ -20,6 +20,10 @@ LOG_FILE = os.getenv("LOG_FILE", "iot_defender_dhcp.log").strip() or "iot_defend
 SUPABASE_DEVICES_TABLE = os.getenv("SUPABASE_DEVICES_TABLE", "devices").strip() or "devices"
 SUPABASE_METRICS_TABLE = os.getenv("SUPABASE_METRICS_TABLE", "device_metrics").strip() or "device_metrics"
 
+IP_BLACKLIST = [
+    "8.8.8.8",
+    "10.42.0.250" 
+]
 
 def read_bool_env(name: str, default_value: bool) -> bool:
     raw = os.getenv(name)
@@ -98,12 +102,17 @@ vendor_scanner = MacLookup()
 def check_threat_intel(mac_addr, hostname, ja3_hash=None):
     print(f"[*] Analyzing {hostname} ({mac_addr}) against threat database...")
     
-    # 1. NEW: Check JA3 if a hash was captured
+    # 1. ip blacklist
+    if dst_ip in IP_BLACKLIST:
+        print(f"[!] Malicious IP found: {dst_ip} is a known malicious host!")
+        return True
+
+    # 2. JA3 hash blacklist
     if ja3_hash:
         if analyze_fingerprint(ja3_hash, ja3_db):
-            return True # Malicious fingerprint match!
+            return True 
 
-    # 2. Existing Hostname check
+    # 3. hostname blacklist
     BLACKLIST_HOSTNAMES = ["malicious-device", "hack-box"]
     if hostname.lower() in BLACKLIST_HOSTNAMES:
         return True
@@ -1046,6 +1055,7 @@ def start_monitoring(supabase_writer):
 
                 # --- 3. IDENTIFY DEVICE (Must happen before section 4) ---
                 mac_addr = first_value(layers, "dhcp_hw_mac_addr", "eth_src", "eth_dst")
+                dst_ip = normalize_ip(first_value(layers, "ip_dst"))
                 if not mac_addr:
                     continue
 
@@ -1068,6 +1078,11 @@ def start_monitoring(supabase_writer):
                 # --- 5. EXECUTE THREAT CHECK & SUPABASE UPDATE ---
                 # We only call this ONCE per loop to avoid the "stopping/hanging" issue
                 try:
+                    is_malicious = check_threat_intel(normalized_mac, hostname, ja3_hash, dst_ip)
+
+                    if is_malicious:
+                        isolate_device(normalized_mac)
+
                     handle_dhcp_presence(normalized_mac, hostname, ip_addr, message_type, supabase_writer, ja3_hash)
                 except Exception as e:
                     print(f"[!] ERROR during device update: {e}")
