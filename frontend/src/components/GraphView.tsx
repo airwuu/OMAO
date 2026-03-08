@@ -28,6 +28,7 @@ const INITIAL_SIZE: GraphSize = {
 const FOCUS_ZOOM_LEVEL = 2.3;
 const FOCUS_ANIMATION_MS = 850;
 const OVERVIEW_PADDING = 45;
+const EMPTY_GRAPH_OVERVIEW_ZOOM = 1;
 const NODE_HITBOX_PADDING_PX = 12;
 
 function getBaseNodeRadius(node: GraphNode): number {
@@ -50,6 +51,7 @@ export const GraphView = memo(function GraphView({
   const [size, setSize] = useState<GraphSize>(INITIAL_SIZE);
   const [graphData, setGraphData] = useState<GraphData>(() => buildGraphData(devices));
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const hasDeviceNodes = graphData.nodes.some((node) => node.kind === "device");
 
   useEffect(() => {
     setGraphData((current) => syncGraphData(current, devices));
@@ -86,11 +88,17 @@ export const GraphView = memo(function GraphView({
     graphRef.current.d3Force("link").distance(1);
 
     const timeoutId = window.setTimeout(() => {
-      graphRef.current?.zoomToFit(500, 45);
+      if (hasDeviceNodes) {
+        graphRef.current?.zoomToFit(500, OVERVIEW_PADDING);
+        return;
+      }
+
+      graphRef.current?.centerAt(0, 0, 500);
+      graphRef.current?.zoom(EMPTY_GRAPH_OVERVIEW_ZOOM, 500);
     }, 350);
 
     return () => window.clearTimeout(timeoutId);
-  }, [graphData.nodes.length]);
+  }, [hasDeviceNodes]);
 
   useEffect(() => {
     if (!selectedId || !graphRef.current) {
@@ -110,9 +118,14 @@ export const GraphView = memo(function GraphView({
   }, [graphData.nodes, selectedId]);
 
   const handleBackgroundClick = useCallback(() => {
-    graphRef.current?.zoomToFit(FOCUS_ANIMATION_MS, OVERVIEW_PADDING);
+    if (hasDeviceNodes) {
+      graphRef.current?.zoomToFit(FOCUS_ANIMATION_MS, OVERVIEW_PADDING);
+    } else {
+      graphRef.current?.centerAt(0, 0, FOCUS_ANIMATION_MS);
+      graphRef.current?.zoom(EMPTY_GRAPH_OVERVIEW_ZOOM, FOCUS_ANIMATION_MS);
+    }
     onClearSelection();
-  }, [onClearSelection]);
+  }, [hasDeviceNodes, onClearSelection]);
 
   const handleNodeHover = useCallback((node: unknown) => {
     const typedNode = node as GraphNode | null;
@@ -137,7 +150,12 @@ export const GraphView = memo(function GraphView({
       const typedNode = node as GraphNode;
 
       if (typedNode.kind === "hub") {
-        graphRef.current?.zoomToFit(FOCUS_ANIMATION_MS, OVERVIEW_PADDING);
+        if (hasDeviceNodes) {
+          graphRef.current?.zoomToFit(FOCUS_ANIMATION_MS, OVERVIEW_PADDING);
+        } else {
+          graphRef.current?.centerAt(0, 0, FOCUS_ANIMATION_MS);
+          graphRef.current?.zoom(EMPTY_GRAPH_OVERVIEW_ZOOM, FOCUS_ANIMATION_MS);
+        }
         onClearSelection();
         return;
       }
@@ -150,7 +168,7 @@ export const GraphView = memo(function GraphView({
         onSelect(typedNode.device);
       }
     },
-    [onClearSelection, onSelect]
+    [hasDeviceNodes, onClearSelection, onSelect]
   );
 
   const getNodeLabel = useCallback((node: unknown) => {
