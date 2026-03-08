@@ -28,37 +28,64 @@ def check_threat_intel(ip_address, ja3_hash, ja3_db):
     if is_bad_ja3:
         return True
 
-    print(f"- JA3 is clean. Checking IP: {ip_address}")
+    print(f"[*] Checking IP: {ip_address}")
     return False
 
 # kill switch
 def isolate_device(source_ip):
     if source_ip in banned_devices:
-        return # Already banned, prevent spamming iptables
+        return 
         
-    print(f"\n[!!!] CRITICAL THREAT CONFIRMED. INITIATING KILL SWITCH ON {source_ip} [!!!]\n")
+    print(f"\n[!] Dropping all traffic from {source_ip}")
     
     try:
-        # Drops all traffic routed FROM this infected device
         subprocess.run(["sudo", "iptables", "-A", "FORWARD", "-s", source_ip, "-j", "DROP"], check=True)
-        # Drops all traffic routed TO this infected device
         subprocess.run(["sudo", "iptables", "-A", "FORWARD", "-d", source_ip, "-j", "DROP"], check=True)
         
         banned_devices.add(source_ip)
-        print(f"[*] {source_ip} has been successfully isolated from the network.")
+        print(f"[-] {source_ip} has been successfully isolated from the network.")
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] Failed to execute iptables: {e}")
 
 # ---------------------------------------------------
-# main loop 
-def start_monitoring():
-    ja3_blacklist = threat_db.get_threat_database()
-    
-    script_start_time = time.time()
+# extracts src, dst, and ja3 from tshark JSON
+def parse_packet(line):
+    try:
+        data = json.loads(line)
+        layers = data.get("layers", {})
 
-    print(f"[*] Starting IoT Defender on interface '{NETWORK_INTERFACE}'...")
-    print(f"[*] Entering LEARNING PHASE for {LEARNING_DURATION} seconds...")
-    tshark_cmd = [
+        src = layers.get("ip_src", [None])[0]
+        dst = layers.get("ip_dst", [None])[0]
+        ja3 = layers.get("tls_handshake_ja3", [None])[0]
+
+        return src, dst, ja3
+    except:
+        return None, None, None
+
+# checks deviations 
+def process_threat(src, dst, ja3, database):
+    if src in banned_devices:
+            return
+
+    prof = baseline_profile.get(src, {"ips": set(), "ja3s": set()})
+    
+    if dst not in prof["ips"] or ja3 not in prof["ja3s"]:
+        print(f"\n[*] New Signature: {src} -> {dst}")
+        
+        if check_threat_intel(dst, ja3, database):
+            isolate_device(src)
+        else:
+            print(f"[*] Signature verified benign.")
+            update_baseline(src, dst, ja3)
+
+# main loop
+def start_monitoring():
+    db = threat_db.get_threat_database()
+    script_start_time = time.time()
+    last_tick = script_start_time
+    active_alert_shown = False
+
+    cmd = [
         "tshark", "-l", "-i", NETWORK_INTERFACE, 
         "-T", "ek",
         "-e", "frame.protocols", 
@@ -68,68 +95,60 @@ def start_monitoring():
         "-e", "tls.handshake.ja3",
         "-e", "dhcp.hw.mac_addr", "-e", "dhcp.option.hostname"
     ]   
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
 
-    process = subprocess.Popen(tshark_cmd, stdout=subprocess.PIPE, text=True)
+    print("")
+    print(f"[*] Monitoring {NETWORK_INTERFACE}...")
+
+    print("")
+    print(f"[*] Learning phase: {LEARNING_DURATION}s remaining...")
 
     with open(LOG_FILE, 'a') as log_file:
         try:
-            for line in process.stdout:
-                # 1. Append raw JSON to our permanent log file
-                log_file.write(line)
-                log_file.flush() 
-                
-                # 2. Parse the packet
+            while True:
                 try:
-                    data = json.loads(line)
-                    if "layers" not in data:
-                        continue
-                        
-                    layers = data["layers"]
-                    src_ip = layers.get("ip_src", [""])[0]
-                    dst_ip = layers.get("ip_dst", [""])[0]
-                    ja3 = layers.get("tls_handshake_ja3", [""])[0]
-                    
-                    if not (src_ip and dst_ip and ja3):
-                        continue # Skip malformed packets
-                        
-                    # 3. Time-based Logic Routing
-                    elapsed_time = time.time() - script_start_time
-                    
-                    if elapsed_time < LEARNING_DURATION:
-                        # We are still learning what is normal
-                        update_baseline(src_ip, dst_ip, ja3)
-                        # Optional: Print a dot to show it's working without spamming the screen
-                        print(".", end="", flush=True) 
-                        
-                    else:
-                        # We are now ENFORCING the baseline
-                        if elapsed_time - LEARNING_DURATION < 1:
-                            print("\n\n[*] LEARNING PHASE COMPLETE. ENTERING ACTIVE MONITORING.[*]\n")
-                            time.sleep(1) 
-                            
-                        # Check if the device is doing something new
-                        profile = baseline_profile.get(src_ip, {"ips": set(), "ja3s": set()})
-                        
-                        is_new_ip = dst_ip not in profile["ips"]
-                        is_new_ja3 = ja3 not in profile["ja3s"]
-                        
-                        if is_new_ip or is_new_ja3:
-                            print(f"\n[*] Deviation detected for {src_ip} -> {dst_ip} [JA3: {ja3}]")
-                            
-                            is_malicious = check_threat_intel(dst_ip, ja3, ja3_blacklist)
-                            if is_malicious:
-                                isolate_device(src_ip)
-                            else:
-                                print(f"[*] Deviation is benign. Updating baseline for {src_ip}.")
-                                update_baseline(src_ip, dst_ip, ja3)
-                                
-                except json.JSONDecodeError:
-                    continue # Ignore Tshark indexing lines
-                    
-        except KeyboardInterrupt:
-            print("\n[*] Shutting down IoT Defender...")
-            process.terminate()
+                    line = process.stdout.readline()
+                except IOError:
+                    line = None
+                current_time = time.time()
+                elapsed = current_time - script_start_time
 
+                if elapsed < LEARNING_DURATION:
+                    if current_time - last_tick >= 1:
+                        remaining = int(LEARNING_DURATION - elapsed)
+                        print(f"[*] Learning phase {int(LEARNING_DURATION - elapsed)}s remaining...", flush=True)
+                        last_tick = current_time
+                elif not active_alert_shown:
+                    print(f"\n\n{'='*40}")
+                    print("[*] Monitoring active.")
+                    print(f"{'='*40}\n")
+                    active_alert_shown = True
+              
+                if line.strip().isdigit():
+                    continue
+
+                log_file.write(line)
+                src, dst, ja3 = parse_packet(line)
+                
+                if not src or not dst:
+                    continue
+
+                if elapsed < LEARNING_DURATION:
+                    update_baseline(src, dst, ja3)
+                    if ja3:
+                        print(f"\nLearning fingerprint: {ja3[:10]}... (from {src})", end="", flush=True)
+                    else:
+                        print(".", end="", flush=True) 
+                else:
+                    if ja3:
+                        process_threat(src, dst, ja3, db)
+                    else: 
+                        pass
+
+        except KeyboardInterrupt:
+            print("\n[*] Stopping...")
+            process.terminate()
+            
 if __name__ == "__main__":
     if os.geteuid() != 0:
         print("[!] ERROR: This script must be run as root (sudo).")
