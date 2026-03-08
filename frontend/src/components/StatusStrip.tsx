@@ -15,7 +15,8 @@ export function StatusStrip({ devices, lastUpdated }: StatusStripProps) {
     {
       good: 0,
       suspicious: 0,
-      blocked: 0
+      blocked: 0,
+      disconnected: 0
     }
   );
 
@@ -26,7 +27,7 @@ export function StatusStrip({ devices, lastUpdated }: StatusStripProps) {
         <p className="status-strip__value">{devices.length}</p>
       </div>
 
-      {(["good", "suspicious", "blocked"] as const).map((status) => (
+      {(["good", "suspicious", "blocked", "disconnected"] as const).map((status) => (
         <div className={`status-strip__item ${statusToClass(status)}`} key={status}>
           <p className="status-strip__label">{STATUS_META[status].label}</p>
           <p className="status-strip__value">{counts[status]}</p>

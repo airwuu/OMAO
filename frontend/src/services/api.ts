@@ -75,7 +75,7 @@ function toTimestampValue(timestamp: string): number {
 }
 
 function normalizeStatus(value: string | null): DeviceStatus {
-  if (value === "suspicious" || value === "blocked" || value === "good") {
+  if (value === "suspicious" || value === "blocked" || value === "good" || value === "disconnected") {
     return value;
   }
 
@@ -185,6 +185,10 @@ function mapMetricSeries(deviceId: string, rows: JsonRecord[]): DeviceMetricsSer
 }
 
 function advisorySummary(status: DeviceStatus | null, advisoryCount: number): string {
+  if (status === "disconnected") {
+    return "Device is currently offline. Check power, Wi-Fi signal, and router connectivity before investigating advisories.";
+  }
+
   if (status === "blocked") {
     return "Network behavior suggests active rate limiting or endpoint block. Investigate upstream service health and firewall rules.";
   }
@@ -289,6 +293,23 @@ async function getAdvisoriesFromSupabase(deviceId: string): Promise<DeviceAdviso
   };
 }
 
+async function deleteDeviceFromSupabase(deviceId: string): Promise<void> {
+  const client = requireSupabase();
+  const byId = await client.from(SUPABASE_DEVICES_TABLE).delete().eq("id", deviceId);
+  if (!byId.error) {
+    return;
+  }
+
+  if (!hasMissingColumnCode(byId.error)) {
+    throw formatSupabaseError(SUPABASE_DEVICES_TABLE, byId.error);
+  }
+
+  const byDeviceId = await client.from(SUPABASE_DEVICES_TABLE).delete().eq("device_id", deviceId);
+  if (byDeviceId.error) {
+    throw formatSupabaseError(SUPABASE_DEVICES_TABLE, byDeviceId.error);
+  }
+}
+
 async function getDevicesFromMockApi(): Promise<Device[]> {
   const payload = await fetchJson<DeviceResponse>("/api/iot/devices");
   return payload.devices;
@@ -319,5 +340,11 @@ export const iotApi = {
     }
 
     return fetchJson<DeviceAdvisoryReport>(`/api/iot/devices/${deviceId}/advisories`);
+  },
+
+  async deleteDevice(deviceId: string): Promise<void> {
+    if (useSupabase) {
+      await deleteDeviceFromSupabase(deviceId);
+    }
   }
 };

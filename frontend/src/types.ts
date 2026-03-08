@@ -1,4 +1,4 @@
-export type DeviceStatus = "good" | "suspicious" | "blocked";
+export type DeviceStatus = "good" | "suspicious" | "blocked" | "disconnected";
 export type DeviceCategory = "iot" | "home";
 
 export interface Device {

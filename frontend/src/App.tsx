@@ -46,6 +46,8 @@ export default function App() {
   const [metrics, setMetrics] = useState<DeviceMetricsSeries | null>(null);
   const [metricsLoading, setMetricsLoading] = useState(false);
   const [metricsError, setMetricsError] = useState<string | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const selectedDevice = useMemo(
     () => devices.find((device) => device.id === selectedDeviceId) ?? null,
@@ -58,6 +60,23 @@ export default function App() {
 
   const handleClearSelection = useCallback(() => {
     setSelectedDeviceId(null);
+  }, []);
+
+  const handleDeleteDevice = useCallback(async (deviceId: string) => {
+    setDeleteLoading(true);
+    setDeleteError(null);
+
+    try {
+      await iotApi.deleteDevice(deviceId);
+      setDevices((currentDevices) => currentDevices.filter((device) => device.id !== deviceId));
+      setSelectedDeviceId((currentId) => (currentId === deviceId ? null : currentId));
+      setMetrics((currentMetrics) => (currentMetrics?.deviceId === deviceId ? null : currentMetrics));
+    } catch (requestError) {
+      const message = requestError instanceof Error ? requestError.message : "Unable to delete device.";
+      setDeleteError(message);
+    } finally {
+      setDeleteLoading(false);
+    }
   }, []);
 
   const {
@@ -129,6 +148,8 @@ export default function App() {
       setMetrics(null);
       setMetricsError(null);
       setMetricsLoading(false);
+      setDeleteError(null);
+      setDeleteLoading(false);
       return;
     }
 
@@ -254,6 +275,9 @@ export default function App() {
           advisoryReport={advisoryReport}
           advisoryLoading={advisoryLoading}
           advisoryError={advisoryError}
+          deleteLoading={deleteLoading}
+          deleteError={deleteError}
+          onDeleteDevice={handleDeleteDevice}
           onRefreshAdvisories={refreshAdvisories}
           onClose={handleClearSelection}
         />

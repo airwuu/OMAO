@@ -25,6 +25,11 @@ If Supabase URL/key are not set, the app falls back to the local mock API.
 
 Run [`supabase/schema.sql`](supabase/schema.sql) in the Supabase SQL editor.
 
+The schema includes:
+- `disconnected` device status support.
+- Read policies for dashboard data.
+- A delete policy on `devices` so dashboard users can remove devices.
+
 ## 3. Start the app
 
 ```bash

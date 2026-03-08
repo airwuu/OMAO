@@ -9,6 +9,7 @@
   --good: #6cff6c;
   --warn: #f8f36b;
   --danger: #ff6464;
+  --offline: #7bb8ff;
   --glow-good: rgba(108, 255, 108, 0.55);
   --layout-columns: 5;
   --layout-gap: 0.7rem;
@@ -170,6 +171,10 @@ body {
 
 .status-blocked {
   box-shadow: 0 0 16px rgba(255, 100, 100, 0.09) inset;
+}
+
+.status-disconnected {
+  box-shadow: 0 0 16px rgba(123, 184, 255, 0.12) inset;
 }
 
 .workspace {
@@ -382,6 +387,12 @@ body {
   padding: 0.05rem 0.35rem;
 }
 
+.drawer__actions {
+  margin-top: 0.7rem;
+  display: grid;
+  gap: 0.45rem;
+}
+
 .metrics-grid {
   margin-top: 0.7rem;
   display: grid;
@@ -480,6 +491,16 @@ body {
 .terminal-button:hover:not(:disabled) {
   border-color: var(--warn);
   color: var(--warn);
+}
+
+.terminal-button--danger {
+  border-color: rgba(255, 100, 100, 0.58);
+  color: #ffc8c8;
+}
+
+.terminal-button--danger:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 .terminal-button:disabled {

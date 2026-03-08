@@ -11,6 +11,9 @@ interface DeviceDrawerProps {
   advisoryReport: DeviceAdvisoryReport | null;
   advisoryLoading: boolean;
   advisoryError: string | null;
+  deleteLoading: boolean;
+  deleteError: string | null;
+  onDeleteDevice: (deviceId: string) => Promise<void>;
   onRefreshAdvisories: () => Promise<void>;
   onClose: () => void;
 }
@@ -23,9 +26,24 @@ export const DeviceDrawer = memo(function DeviceDrawer({
   advisoryReport,
   advisoryLoading,
   advisoryError,
+  deleteLoading,
+  deleteError,
+  onDeleteDevice,
   onRefreshAdvisories,
   onClose
 }: DeviceDrawerProps) {
+  const handleDeleteClick = async () => {
+    if (!device || deleteLoading) {
+      return;
+    }
+
+    if (!window.confirm(`Delete "${device.name}" from the dashboard?`)) {
+      return;
+    }
+
+    await onDeleteDevice(device.id);
+  };
+
   return (
     <aside className={`drawer ${device ? "drawer--open" : ""}`} aria-live="polite">
       <div className="drawer__content">
@@ -49,6 +67,20 @@ export const DeviceDrawer = memo(function DeviceDrawer({
               <p>IP: {device.ip}</p>
               <p>MAC: {device.mac}</p>
               <p>Last seen: {new Date(device.lastSeenAt).toLocaleTimeString()}</p>
+            </div>
+
+            <div className="drawer__actions">
+              <button
+                type="button"
+                className="terminal-button terminal-button--danger"
+                onClick={() => {
+                  void handleDeleteClick();
+                }}
+                disabled={deleteLoading}
+              >
+                {deleteLoading ? "Deleting..." : "Delete Device"}
+              </button>
+              {deleteError ? <p className="error-text">{deleteError}</p> : null}
             </div>
 
             <AdvisoryPanel

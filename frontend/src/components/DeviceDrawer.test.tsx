@@ -26,6 +26,9 @@ describe("DeviceDrawer", () => {
         advisoryReport={null}
         advisoryLoading={false}
         advisoryError={null}
+        deleteLoading={false}
+        deleteError={null}
+        onDeleteDevice={vi.fn(async () => {})}
         onRefreshAdvisories={vi.fn(async () => {})}
         onClose={vi.fn()}
       />
@@ -62,6 +65,9 @@ describe("DeviceDrawer", () => {
         }}
         advisoryLoading={false}
         advisoryError={null}
+        deleteLoading={false}
+        deleteError={null}
+        onDeleteDevice={vi.fn(async () => {})}
         onRefreshAdvisories={vi.fn(async () => {})}
         onClose={vi.fn()}
       />
@@ -70,5 +76,6 @@ describe("DeviceDrawer", () => {
     expect(screen.getByText("Porch Cam")).toBeInTheDocument();
     expect(screen.getByText("Outage + Security Agent")).toBeInTheDocument();
     expect(screen.getByText(/Status normal/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /delete device/i })).toBeInTheDocument();
   });
 });

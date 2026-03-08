@@ -21,6 +21,12 @@ export const STATUS_META: Record<
     color: "#FF6464",
     glow: "rgba(255, 100, 100, 0.55)",
     summary: "rate limited / blocked"
+  },
+  disconnected: {
+    label: "disconnected",
+    color: "#7BB8FF",
+    glow: "rgba(123, 184, 255, 0.5)",
+    summary: "offline"
   }
 };
 

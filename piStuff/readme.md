@@ -32,12 +32,18 @@ export LOG_FILE="iot_defender_dhcp.log"
 export SUPABASE_DEVICES_TABLE="devices"
 export SUPABASE_METRICS_TABLE="device_metrics"
 export DHCP_DUPLICATE_WINDOW_SEC="20"
+export DISCONNECT_TIMEOUT_SEC="60"
+export METRICS_SAMPLE_INTERVAL_SEC="10"
+export PING_COUNT="3"
+export PING_TIMEOUT_SEC="1"
 ```
 
 Notes:
 
 - `SUPABASE_SERVICE_ROLE_KEY` is sensitive. Keep it only on trusted backend hosts and never expose it in frontend code.
-- Duplicate suppression only applies to short DHCP bursts. Reconnects after the window are written as new metric events.
+- Duplicate suppression only applies to short DHCP bursts. DHCP ACK-style packets can still refresh IP quickly.
+- Devices are marked `disconnected` after `DISCONNECT_TIMEOUT_SEC` of inactivity.
+- Active ping probes generate the latency/packet-loss series shown in the dashboard.
 
 ## 3) Run
 
@@ -51,8 +57,9 @@ sudo -E python3 piStuff/capture.py
 
 ## 4) What Gets Written
 
-On each accepted DHCP join/reconnect event:
+On DHCP activity and metrics intervals:
 
 - Upsert `devices` by `id` (deterministic from MAC).
-- Insert one `device_metrics` row.
-- `status` is set to `blocked` when threat intel marks the device malicious; otherwise `good`.
+- Insert periodic `device_metrics` rows from active ping probes.
+- `status` is `blocked` when threat intel marks the device malicious, `good` when healthy, and `disconnected` after inactivity timeout.
+- Device IP is refreshed from DHCP/server response packets so `wlan0` clients do not stay at `0.0.0.0`.

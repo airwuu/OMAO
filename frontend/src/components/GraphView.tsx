@@ -248,6 +248,7 @@ export const GraphView = memo(function GraphView({
         <span><i style={{ backgroundColor: STATUS_META.good.color }} />good</span>
         <span><i style={{ backgroundColor: STATUS_META.suspicious.color }} />suspicious</span>
         <span><i style={{ backgroundColor: STATUS_META.blocked.color }} />blocked</span>
+        <span><i style={{ backgroundColor: STATUS_META.disconnected.color }} />disconnected</span>
       </div>
       <div className="graph-shell__canvas" ref={containerRef}>
         <ForceGraph2D
