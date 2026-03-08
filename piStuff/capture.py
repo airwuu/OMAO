@@ -102,11 +102,11 @@ traffic_analysis_lock = threading.Lock()
 vendor_scanner = MacLookup() 
 
 
-def check_threat_intel(mac_addr, hostname, ja3_hash=None):
+def check_threat_intel(mac_addr, hostname, ja3_hash=None, dst_ip=None):
     print(f"[*] Analyzing {hostname} ({mac_addr}) against threat database...")
     
     # 1. ip blacklist
-    if dst_ip in IP_BLACKLIST:
+    if dst_ip and dst_ip in IP_BLACKLIST:
         print(f"[!] Malicious IP found: {dst_ip} is a known malicious host!")
         return True
 
@@ -916,7 +916,7 @@ def disconnect_worker(stop_event, supabase_writer):
                 print(f"[!] Supabase disconnect update failed for {mac_addr}: {error}")
 
 
-def handle_dhcp_presence(mac_addr, hostname, ip_addr, message_type, supabase_writer, ja3_hash=None):
+def handle_dhcp_presence(mac_addr, hostname, ip_addr, message_type, supabase_writer, ja3_hash=None, dst_ip=None):
     normalized_mac = normalize_mac(mac_addr)
     if should_skip_duplicate(normalized_mac, message_type):
         return
@@ -948,7 +948,7 @@ def handle_dhcp_presence(mac_addr, hostname, ip_addr, message_type, supabase_wri
     elif message_type == 5 and previous_snapshot is not None:
         is_malicious = bool(previous_snapshot.get("is_malicious"))
     else:
-        is_malicious = check_threat_intel(normalized_mac, resolved_hostname, ja3_hash)
+        is_malicious = check_threat_intel(normalized_mac, resolved_hostname, ja3_hash, dst_ip)
 
     if is_malicious:
         isolate_device(normalized_mac)
@@ -1078,6 +1078,11 @@ def start_monitoring(supabase_writer):
                 else:
                     ja3_hash = ja3_raw
 
+                mac_addr = first_value(layers, "dhcp_hw_mac_addr", "eth_src", "eth_dst")
+                if ja3_hash:
+                    preview_mac = normalize_mac(mac_addr) if mac_addr else "unknown"
+                    print(f"\n JA3 captured: {ja3_hash} from {preview_mac}")
+
                 message_type = parse_dhcp_message_type(
                     first_value(layers, "dhcp_option_dhcp", "dhcp_option_dhcp_message_type")
                 )
@@ -1092,14 +1097,11 @@ def start_monitoring(supabase_writer):
                     continue
 
                 # --- 3. IDENTIFY DEVICE (Must happen before section 4) ---
-                mac_addr = first_value(layers, "dhcp_hw_mac_addr", "eth_src", "eth_dst")
                 dst_ip = normalize_ip(first_value(layers, "ip_dst"))
                 if not mac_addr:
                     continue
 
                 normalized_mac = normalize_mac(mac_addr)
-                if ja3_hash:
-                    print(f"\n JA3 captured: {ja3_hash} from {normalized_mac}")
                 previous_snapshot = get_registry_snapshot_for_mac(normalized_mac)
                 previous_ip = str(previous_snapshot["ip"]) if previous_snapshot else "0.0.0.0"
                 previous_name = str(previous_snapshot["name"]) if previous_snapshot else "Unknown"
@@ -1116,14 +1118,16 @@ def start_monitoring(supabase_writer):
                     log_packet_summary(data, layers, message_type, udp_dstport)
 
                 # --- 5. EXECUTE THREAT CHECK & SUPABASE UPDATE ---
-                # We only call this ONCE per loop to avoid the "stopping/hanging" issue
                 try:
-                    is_malicious = check_threat_intel(normalized_mac, hostname, ja3_hash, dst_ip)
-
-                    if is_malicious:
-                        isolate_device(normalized_mac)
-
-                    handle_dhcp_presence(normalized_mac, hostname, ip_addr, message_type, supabase_writer, ja3_hash)
+                    handle_dhcp_presence(
+                        normalized_mac,
+                        hostname,
+                        ip_addr,
+                        message_type,
+                        supabase_writer,
+                        ja3_hash,
+                        dst_ip
+                    )
                 except Exception as e:
                     print(f"[!] ERROR during device update: {e}")
 
