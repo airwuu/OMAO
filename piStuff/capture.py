@@ -6,7 +6,7 @@ import os
 import threat_db
 
 # config
-NETWORK_INTERFACE = "eth0"          # Change to your active interface (e.g., wlp2s0, eth0)
+NETWORK_INTERFACE = "wlan0"          # Change to your active interface (e.g., wlp2s0, eth0)
 LOG_FILE = "tshark_history.json"     # Where raw packets are appended
 LEARNING_DURATION = 10               # Seconds to spend building the baseline before enforcing
 
