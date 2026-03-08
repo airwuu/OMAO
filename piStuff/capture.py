@@ -290,11 +290,30 @@ class SupabaseWriter:
         timestamp = current_timestamp_utc()
         safe_hostname = fallback_device_name(hostname, mac_addr)
 
+        try:
+            # Look up the manufacturer (e.g., "Espressif Inc" or "Apple")
+            vendor = vendor_scanner.lookup(mac_addr)
+        except Exception:
+            vendor = "Unknown Vendor"
+
+        # Simple logic to determine the 'type'
+        v_lower = vendor.lower()
+        h_lower = safe_hostname.lower()
+        
+        if "espressif" in v_lower or "esp" in h_lower:
+            device_type = "smart_home"
+        elif "apple" in v_lower or "samsung" in v_lower or "mobile" in h_lower:
+            device_type = "mobile"
+        elif "raspberry" in v_lower:
+            device_type = "gateway"
+        else:
+            device_type = "iot"  # Default if we aren't sure
+
         device_row = [{
             "id": device_id,
             "name": safe_hostname,
-            "type": "unknown",
-            "vendor": "Unknown",
+            "type": device_type,
+            "vendor": vendor,
             "model": "Unknown",
             "ip": ip_addr,
             "mac": mac_addr,
