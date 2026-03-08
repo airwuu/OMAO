@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from mac_vendor_lookup import MacLookup
+from threat_db import get_threat_database, analyze_fingerprint
 
 # --- CONFIGURATION ---
 NETWORK_INTERFACE = os.getenv("NETWORK_INTERFACE", "eth0").strip() or "eth0"
@@ -88,12 +89,19 @@ traffic_counters_lock = threading.Lock()
 vendor_scanner = MacLookup() 
 
 
-def check_threat_intel(mac_addr, hostname):
-    """
-    Placeholder: Check if the device's MAC or Hostname is suspicious.
-    """
+def check_threat_intel(mac_addr, hostname, ja3_hash=None):
     print(f"[*] Analyzing {hostname} ({mac_addr}) against threat database...")
-    # Add your API calls or local blacklist checks here.
+    
+    # 1. NEW: Check JA3 if a hash was captured
+    if ja3_hash:
+        if analyze_fingerprint(ja3_hash, ja3_db):
+            return True # Malicious fingerprint match!
+
+    # 2. Existing Hostname check
+    BLACKLIST_HOSTNAMES = ["malicious-device", "hack-box"]
+    if hostname.lower() in BLACKLIST_HOSTNAMES:
+        return True
+
     return False
 
 
@@ -625,7 +633,7 @@ def disconnect_worker(stop_event, supabase_writer):
                 print(f"[!] Supabase disconnect update failed for {mac_addr}: {error}")
 
 
-def handle_dhcp_presence(mac_addr, hostname, ip_addr, message_type, supabase_writer):
+def handle_dhcp_presence(mac_addr, hostname, ip_addr, message_type, supabase_writer, ja3_hash=None):
     normalized_mac = normalize_mac(mac_addr)
     if should_skip_duplicate(normalized_mac, message_type):
         return
@@ -642,7 +650,7 @@ def handle_dhcp_presence(mac_addr, hostname, ip_addr, message_type, supabase_wri
     if message_type == 5 and previous_snapshot is not None:
         is_malicious = bool(previous_snapshot.get("is_malicious"))
     else:
-        is_malicious = check_threat_intel(normalized_mac, hostname)
+        is_malicious = check_threat_intel(normalized_mac, hostname, ja3_hash)
 
     if is_malicious:
         isolate_device(normalized_mac)
@@ -697,19 +705,17 @@ def start_monitoring(supabase_writer):
     print(f"[*] Packet logs to stdout: {'enabled' if SHOW_PACKET_LOGS else 'disabled'}")
     print("[*] Network activity capture: enabled (per-device kbps)")
 
-    # Tshark command focused on DHCP handshake packets.
     tshark_cmd = [
         "tshark", "-l", "-i", NETWORK_INTERFACE,
         "-T", "ek",
-        "-f", "udp port 67 or udp port 68",  # BPF filter for speed.
-        "-e", "dhcp.option.dhcp",            # Type (1=Discover, 3=Request).
-        "-e", "dhcp.hw.mac_addr",            # MAC of the device.
-        "-e", "dhcp.option.hostname",        # Hostname of the device.
+        "-f", "udp port 67 or udp port 68 or tcp port 443", 
+        "-e", "dhcp.hw.mac_addr",
+        "-e", "dhcp.option.hostname",
+        "-e", "tls.handshake.ja3", 
         "-e", "ip.src",
         "-e", "ip.dst",
         "-e", "udp.dstport"
     ]
-
     process = subprocess.Popen(
         tshark_cmd,
         stdout=subprocess.PIPE,
@@ -756,6 +762,8 @@ def start_monitoring(supabase_writer):
                 if not isinstance(layers, dict):
                     continue
 
+                ja3_hash = first_value(layers, "tls_handshake_ja3")
+                
                 message_type = parse_dhcp_message_type(
                     first_value(layers, "dhcp_option_dhcp", "dhcp_option_dhcp_message_type")
                 )
@@ -769,7 +777,7 @@ def start_monitoring(supabase_writer):
                 if SHOW_PACKET_LOGS:
                     log_packet_summary(data, layers, message_type, udp_dstport)
 
-                if message_type not in {1, 3, 5}:
+                if message_type not in {1, 3, 5} and not ja3_hash:
                     continue
 
                 mac_addr = first_value(layers, "dhcp_hw_mac_addr", "eth_src", "eth_dst")
@@ -783,7 +791,7 @@ def start_monitoring(supabase_writer):
                 hostname = first_value(layers, "dhcp_option_hostname") or previous_name
                 ip_addr = resolve_device_ip(layers, message_type, previous_ip)
 
-                handle_dhcp_presence(normalized_mac, hostname, ip_addr, message_type, supabase_writer)
+                handle_dhcp_presence(normalized_mac, hostname, ip_addr, message_type, supabase_writer, ja3_hash)
         except KeyboardInterrupt:
             print("\n[*] Shutting down IoT Defender...")
         finally:
@@ -818,6 +826,9 @@ if __name__ == "__main__":
         vendor_scanner.update_vendors() 
     except Exception as e:
         print(f"[!] Warning: Could not update vendor list: {e}. Using local cache.")
+
+    global ja3_db
+    ja3_db = get_threat_database()
 
     supabase_url = required_env("SUPABASE_URL")
     supabase_service_role_key = required_env("SUPABASE_SERVICE_ROLE_KEY")
