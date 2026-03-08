@@ -299,6 +299,32 @@ class SupabaseWriter:
         except urllib.error.URLError as error:
             raise RuntimeError(f"Supabase request error for {path}: {error.reason}") from error
 
+    def _get(self, path):
+        endpoint = f"{self.base_url}{path}"
+        request = urllib.request.Request(
+            endpoint,
+            method="GET"
+        )
+        request.add_header("apikey", self.service_role_key)
+        request.add_header("Authorization", f"Bearer {self.service_role_key}")
+        request.add_header("Content-Type", "application/json")
+
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                if response.status >= 300:
+                    response_body = response.read().decode("utf-8", errors="replace")
+                    raise RuntimeError(
+                        f"Supabase GET failed ({response.status}) for {path}: {response_body}"
+                    )
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            response_body = error.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"Supabase GET failed ({error.code}) for {path}: {response_body}"
+            ) from error
+        except urllib.error.URLError as error:
+            raise RuntimeError(f"Supabase request error for {path}: {error.reason}") from error
+
     def upsert_device(self, device_id, mac_addr, hostname, ip_addr, status):
         timestamp = current_timestamp_utc()
         safe_hostname = fallback_device_name(hostname, mac_addr)
@@ -376,6 +402,10 @@ class SupabaseWriter:
             payload,
             "resolution=merge-duplicates,return=minimal"
         )
+        
+    def get_all_baselines(self):
+        # Fetch mac, traffic_baseline, and avg_pkts_per_sec for all devices
+        return self._get(f"/rest/v1/{self.encoded_devices_table}?select=mac,traffic_baseline,avg_pkts_per_sec")
 
 
 def get_registry_snapshot_for_mac(mac_addr):
@@ -681,9 +711,9 @@ def anomaly_analysis_worker(stop_event, supabase_writer):
     # Analyzing every 1 minute
     ANOMALY_CHECK_INTERVAL_SEC = 60.0
     
-    # Simple EWMA learning factor for the "1 hour" baseline.
-    # We update every 1 min, so 60 updates per hour. Alpha = 1/60 ~ 0.016
-    ALPHA = 0.016
+    # We want a 24-hour learning period. 
+    # 24 hours * 60 minutes = 1440 updates for a full cycle. Alpha = 1/1440.
+    ALPHA = 1.0 / 1440.0
 
     while not stop_event.wait(ANOMALY_CHECK_INTERVAL_SEC):
         # 1. Extract short term data and clear it to start fresh for the next minute
@@ -889,6 +919,29 @@ def log_packet_summary(data, layers, message_type, udp_dstport):
     )
 
 
+def load_baselines(supabase_writer):
+    print("[*] Syncing historical baselines from Supabase...")
+    try:
+        devices = supabase_writer.get_all_baselines()
+        loaded_count = 0
+        with traffic_analysis_lock:
+            for device in devices:
+                mac_addr = normalize_mac(device.get("mac", ""))
+                baseline_dict = dict(device.get("traffic_baseline") or {})
+                avg_pkts = float(device.get("avg_pkts_per_sec") or 0.0)
+                
+                if mac_addr and baseline_dict:
+                    traffic_long_term[mac_addr] = {
+                        "avg_pkts_per_sec": avg_pkts,
+                        "ips": baseline_dict,
+                        "updates_count": 1440 # Assume fully mature baseline
+                    }
+                    loaded_count += 1
+        print(f"[*] Successfully loaded baselines for {loaded_count} devices.")
+    except Exception as error:
+        print(f"[!] Failed to sync history from Supabase: {error}")
+
+
 def start_monitoring(supabase_writer):
     print(f"[*] Starting IoT Defender on interface '{NETWORK_INTERFACE}'...")
     print("[*] Filtering for DHCP Discover/Request (new joins + reconnects)...")
@@ -1060,5 +1113,8 @@ if __name__ == "__main__":
         SUPABASE_DEVICES_TABLE,
         SUPABASE_METRICS_TABLE
     )
+
+    # Sync baselines before starting packet capture
+    load_baselines(writer)
 
     start_monitoring(writer)
