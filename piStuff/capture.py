@@ -81,7 +81,7 @@ SHOW_PACKET_LOGS = read_bool_env("SHOW_PACKET_LOGS", True)
 DISCONNECT_SCAN_INTERVAL_SEC = min(2.0, max(0.5, DISCONNECT_TIMEOUT_SEC / 8.0))
 PING_REPLY_TIMEOUT_SEC = max(1, int(round(PING_TIMEOUT_SEC)))
 # Hard fail-safe: any espressif-named device above this traffic rate is blocked immediately.
-ESPRESSIF_HARD_BLOCK_KBPS = 20000.0
+ESPRESSIF_HARD_BLOCK_KBPS = 10000.0
 
 PING_PACKET_LOSS_PATTERN = re.compile(r"(\d+(?:\.\d+)?)%\s*packet loss")
 PING_AVERAGE_RTT_PATTERN = re.compile(r"=\s*[\d.]+/([\d.]+)/[\d.]+/[\d.]+\s*ms")
