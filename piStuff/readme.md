@@ -32,8 +32,9 @@ export LOG_FILE="iot_defender_dhcp.log"
 export SUPABASE_DEVICES_TABLE="devices"
 export SUPABASE_METRICS_TABLE="device_metrics"
 export DHCP_DUPLICATE_WINDOW_SEC="20"
-export DISCONNECT_TIMEOUT_SEC="60"
-export METRICS_SAMPLE_INTERVAL_SEC="10"
+export DISCONNECT_TIMEOUT_SEC="15"
+export METRICS_SAMPLE_INTERVAL_SEC="5"
+export ANOMALY_CHECK_INTERVAL_SEC="10"
 export PING_COUNT="3"
 export PING_TIMEOUT_SEC="1"
 export SHOW_PACKET_LOGS="true"
@@ -44,8 +45,9 @@ Notes:
 - `SUPABASE_SERVICE_ROLE_KEY` is sensitive. Keep it only on trusted backend hosts and never expose it in frontend code.
 - Duplicate suppression only applies to short DHCP bursts. DHCP ACK-style packets can still refresh IP quickly.
 - Devices are marked `disconnected` after `DISCONNECT_TIMEOUT_SEC` of inactivity.
-- Active ping probes generate the latency/packet-loss series shown in the dashboard.
+- Active ping probes generate the latency/packet-loss series shown in the dashboard at `METRICS_SAMPLE_INTERVAL_SEC`.
 - Passive traffic capture generates per-device `network_activity_kbps` so heavy internet usage is visible.
+- Traffic anomaly checks run at `ANOMALY_CHECK_INTERVAL_SEC` while keeping a 24-hour rolling baseline.
 
 ## 3) Run
 

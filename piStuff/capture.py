@@ -67,12 +67,13 @@ def read_positive_int_env(name: str, default_value: int) -> int:
 
 
 DHCP_DUPLICATE_WINDOW_SEC = read_positive_float_env("DHCP_DUPLICATE_WINDOW_SEC", 20)
-DISCONNECT_TIMEOUT_SEC = read_positive_float_env("DISCONNECT_TIMEOUT_SEC", 60)
-METRICS_SAMPLE_INTERVAL_SEC = read_positive_float_env("METRICS_SAMPLE_INTERVAL_SEC", 10)
+DISCONNECT_TIMEOUT_SEC = read_positive_float_env("DISCONNECT_TIMEOUT_SEC", 15)
+METRICS_SAMPLE_INTERVAL_SEC = read_positive_float_env("METRICS_SAMPLE_INTERVAL_SEC", 5)
+ANOMALY_CHECK_INTERVAL_SEC = read_positive_float_env("ANOMALY_CHECK_INTERVAL_SEC", 10)
 PING_COUNT = read_positive_int_env("PING_COUNT", 3)
 PING_TIMEOUT_SEC = read_positive_float_env("PING_TIMEOUT_SEC", 1)
 SHOW_PACKET_LOGS = read_bool_env("SHOW_PACKET_LOGS", True)
-DISCONNECT_SCAN_INTERVAL_SEC = min(5.0, max(1.0, DISCONNECT_TIMEOUT_SEC / 4.0))
+DISCONNECT_SCAN_INTERVAL_SEC = min(2.0, max(0.5, DISCONNECT_TIMEOUT_SEC / 8.0))
 PING_REPLY_TIMEOUT_SEC = max(1, int(round(PING_TIMEOUT_SEC)))
 
 PING_PACKET_LOSS_PATTERN = re.compile(r"(\d+(?:\.\d+)?)%\s*packet loss")
@@ -708,15 +709,16 @@ def handle_anomaly(mac_addr, hostname, ip_addr, reason, supabase_writer):
 
 
 def anomaly_analysis_worker(stop_event, supabase_writer):
-    # Analyzing every 1 minute
-    ANOMALY_CHECK_INTERVAL_SEC = 60.0
-    
-    # We want a 24-hour learning period. 
-    # 24 hours * 60 minutes = 1440 updates for a full cycle. Alpha = 1/1440.
-    ALPHA = 1.0 / 1440.0
+    # Keep a 24-hour effective learning horizon regardless of analysis interval.
+    updates_per_day = max(1.0, (24.0 * 60.0 * 60.0) / ANOMALY_CHECK_INTERVAL_SEC)
+    ALPHA = 1.0 / updates_per_day
+    warmup_updates = max(5, int(round((5.0 * 60.0) / ANOMALY_CHECK_INTERVAL_SEC)))
+    packet_threshold_scale = ANOMALY_CHECK_INTERVAL_SEC / 60.0
+    new_ip_packet_threshold = max(2, int(round(10 * packet_threshold_scale)))
+    ratio_spike_packet_threshold = max(3, int(round(20 * packet_threshold_scale)))
 
     while not stop_event.wait(ANOMALY_CHECK_INTERVAL_SEC):
-        # 1. Extract short term data and clear it to start fresh for the next minute
+        # 1. Extract short term data and clear it to start fresh for the next analysis window
         with traffic_analysis_lock:
             current_short_term = traffic_short_term.copy()
             traffic_short_term.clear()
@@ -728,7 +730,7 @@ def anomaly_analysis_worker(stop_event, supabase_writer):
                 for mac, state in device_registry.items()
             }
 
-        # 3. Process each device that had traffic in the last minute
+        # 3. Process each device that had traffic in the latest analysis window
         for mac_addr, short_term_ips in current_short_term.items():
             snapshot = snapshots.get(mac_addr)
             if not snapshot:
@@ -766,8 +768,8 @@ def anomaly_analysis_worker(stop_event, supabase_writer):
             is_anomalous = False
             reason = ""
 
-            # Only run anomaly rules if we have built a decent baseline (e.g., at least 5 minutes)
-            if updates_count >= 5:
+            # Only run anomaly rules after enough baseline has accumulated (about 5 minutes).
+            if updates_count >= warmup_updates:
                 # Rule 1: Volume Spike (>300% increase over baseline)
                 # Ignore very small baselines to avoid false positives on quiet devices
                 if lt_avg_pkts_per_sec > 1.0 and st_pkts_per_sec > (lt_avg_pkts_per_sec * 3.0):
@@ -783,15 +785,15 @@ def anomaly_analysis_worker(stop_event, supabase_writer):
                         # New IP or massively increased percentage
                         # E.g., if it was < 1% historically, but is now > 20% of traffic
                         if lt_percentage < 0.01 and st_percentage > 0.20:
-                            # And must be a meaningful amount of packets (e.g. > 10 pkts)
-                            if short_term_ips[ip] > 10:
+                            # Require a meaningful packet count in the current analysis window.
+                            if short_term_ips[ip] > new_ip_packet_threshold:
                                 is_anomalous = True
                                 reason = f"Abnormal connection to {ip} ({st_percentage*100:.1f}% of traffic, baseline {lt_percentage*100:.1f}%)"
                                 break
                         
                         # Existing IP ratio suddenly spiked severely (e.g. from <10% to >50%)
                         if lt_percentage < 0.10 and st_percentage > 0.50:
-                            if short_term_ips[ip] > 20: # Require even more packets to flag existing IPs
+                            if short_term_ips[ip] > ratio_spike_packet_threshold:
                                 is_anomalous = True
                                 reason = f"Ratio spike to {ip} ({st_percentage*100:.1f}% of traffic, baseline {lt_percentage*100:.1f}%)"
                                 break
@@ -934,7 +936,7 @@ def load_baselines(supabase_writer):
                     traffic_long_term[mac_addr] = {
                         "avg_pkts_per_sec": avg_pkts,
                         "ips": baseline_dict,
-                        "updates_count": 1440 # Assume fully mature baseline
+                        "updates_count": int(max(1.0, round((24.0 * 60.0 * 60.0) / ANOMALY_CHECK_INTERVAL_SEC)))
                     }
                     loaded_count += 1
         print(f"[*] Successfully loaded baselines for {loaded_count} devices.")
@@ -947,7 +949,9 @@ def start_monitoring(supabase_writer):
     print("[*] Filtering for DHCP Discover/Request (new joins + reconnects)...")
     print(f"[*] Duplicate suppression window: {DHCP_DUPLICATE_WINDOW_SEC:.1f} seconds")
     print(f"[*] Disconnect timeout: {DISCONNECT_TIMEOUT_SEC:.1f} seconds")
+    print(f"[*] Disconnect scan interval: {DISCONNECT_SCAN_INTERVAL_SEC:.1f} seconds")
     print(f"[*] Metrics sample interval: {METRICS_SAMPLE_INTERVAL_SEC:.1f} seconds")
+    print(f"[*] Anomaly analysis interval: {ANOMALY_CHECK_INTERVAL_SEC:.1f} seconds")
     print(f"[*] Ping probe config: count={PING_COUNT}, timeout={PING_TIMEOUT_SEC:.1f}s")
     print(f"[*] Logging raw packet output to '{LOG_FILE}'")
     print(f"[*] Packet logs to stdout: {'enabled' if SHOW_PACKET_LOGS else 'disabled'}")

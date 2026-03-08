@@ -1,12 +1,50 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { RealtimeChannel } from "@supabase/supabase-js";
 import { DeviceDrawer } from "./components/DeviceDrawer";
 import { GraphView } from "./components/GraphView";
 import { StatusStrip } from "./components/StatusStrip";
 import { useAdvisoryReport } from "./hooks/useAdvisoryReport";
 import { iotApi } from "./services/api";
+import { supabase } from "./services/supabaseClient";
 import type { Device, DeviceMetricsSeries } from "./types";
 
-const POLLING_INTERVAL_MS = 10_000;
+const DEFAULT_POLL_INTERVAL_MS = 2_000;
+const REALTIME_REFRESH_DEBOUNCE_MS = 250;
+const SUPABASE_DEVICES_TABLE = import.meta.env.VITE_SUPABASE_DEVICES_TABLE?.trim() || "devices";
+const SUPABASE_METRICS_TABLE = import.meta.env.VITE_SUPABASE_METRICS_TABLE?.trim() || "device_metrics";
+
+function readPositiveIntEnv(rawValue: string | undefined, fallbackValue: number): number {
+  if (!rawValue) {
+    return fallbackValue;
+  }
+
+  const parsed = Number(rawValue);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    const normalized = Math.floor(parsed);
+    if (normalized >= 1) {
+      return normalized;
+    }
+  }
+
+  return fallbackValue;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function formatPollingInterval(ms: number): string {
+  return ms % 1000 === 0 ? `${ms / 1000}s` : `${ms}ms`;
+}
+
+const DEVICE_POLL_INTERVAL_MS = readPositiveIntEnv(
+  import.meta.env.VITE_DEVICE_POLL_INTERVAL_MS,
+  DEFAULT_POLL_INTERVAL_MS
+);
+const METRICS_POLL_INTERVAL_MS = readPositiveIntEnv(
+  import.meta.env.VITE_METRICS_POLL_INTERVAL_MS,
+  DEFAULT_POLL_INTERVAL_MS
+);
 
 function areStableDeviceFieldsEqual(previous: Device[], next: Device[]): boolean {
   if (previous.length !== next.length) {
@@ -36,6 +74,7 @@ function areStableDeviceFieldsEqual(previous: Device[], next: Device[]): boolean
 }
 
 export default function App() {
+  const fallbackPollingLabel = formatPollingInterval(Math.max(DEVICE_POLL_INTERVAL_MS, METRICS_POLL_INTERVAL_MS));
   const [devices, setDevices] = useState<Device[]>([]);
   const [devicesError, setDevicesError] = useState<string | null>(null);
   const [devicesLoading, setDevicesLoading] = useState(true);
@@ -89,9 +128,12 @@ export default function App() {
   useEffect(() => {
     let active = true;
     let pending = false;
+    let refetchAfterPending = false;
+    let queuedRefreshId: number | null = null;
 
     const fetchDevices = async () => {
       if (pending) {
+        refetchAfterPending = true;
         return;
       }
 
@@ -129,17 +171,56 @@ export default function App() {
           setDevicesLoading(false);
         }
         pending = false;
+        if (active && refetchAfterPending) {
+          refetchAfterPending = false;
+          void fetchDevices();
+        }
       }
+    };
+
+    const queueDeviceRefresh = (delayMs = REALTIME_REFRESH_DEBOUNCE_MS) => {
+      if (!active) {
+        return;
+      }
+
+      if (queuedRefreshId !== null) {
+        window.clearTimeout(queuedRefreshId);
+      }
+
+      queuedRefreshId = window.setTimeout(() => {
+        queuedRefreshId = null;
+        void fetchDevices();
+      }, delayMs);
     };
 
     void fetchDevices();
     const intervalId = window.setInterval(() => {
       void fetchDevices();
-    }, POLLING_INTERVAL_MS);
+    }, DEVICE_POLL_INTERVAL_MS);
+
+    let channel: RealtimeChannel | null = null;
+    if (supabase) {
+      channel = supabase
+        .channel("dashboard-devices")
+        .on("postgres_changes", { event: "*", schema: "public", table: SUPABASE_DEVICES_TABLE }, () => {
+          queueDeviceRefresh();
+        })
+        .subscribe((status) => {
+          if (status === "SUBSCRIBED") {
+            queueDeviceRefresh(0);
+          }
+        });
+    }
 
     return () => {
       active = false;
       window.clearInterval(intervalId);
+      if (queuedRefreshId !== null) {
+        window.clearTimeout(queuedRefreshId);
+      }
+      if (channel && supabase) {
+        void supabase.removeChannel(channel);
+      }
     };
   }, []);
 
@@ -155,10 +236,13 @@ export default function App() {
 
     let active = true;
     let pending = false;
+    let refetchAfterPending = false;
+    let queuedRefreshId: number | null = null;
     setMetrics(null);
 
     const fetchMetrics = async () => {
       if (pending) {
+        refetchAfterPending = true;
         return;
       }
 
@@ -182,17 +266,70 @@ export default function App() {
           setMetricsLoading(false);
         }
         pending = false;
+        if (active && refetchAfterPending) {
+          refetchAfterPending = false;
+          void fetchMetrics();
+        }
       }
+    };
+
+    const queueMetricRefresh = (delayMs = REALTIME_REFRESH_DEBOUNCE_MS) => {
+      if (!active) {
+        return;
+      }
+
+      if (queuedRefreshId !== null) {
+        window.clearTimeout(queuedRefreshId);
+      }
+
+      queuedRefreshId = window.setTimeout(() => {
+        queuedRefreshId = null;
+        void fetchMetrics();
+      }, delayMs);
     };
 
     void fetchMetrics();
     const intervalId = window.setInterval(() => {
       void fetchMetrics();
-    }, POLLING_INTERVAL_MS);
+    }, METRICS_POLL_INTERVAL_MS);
+
+    let channel: RealtimeChannel | null = null;
+    if (supabase) {
+      channel = supabase
+        .channel(`dashboard-metrics-${selectedDeviceId}`)
+        .on("postgres_changes", { event: "INSERT", schema: "public", table: SUPABASE_METRICS_TABLE }, (payload) => {
+          if (!isRecord(payload.new)) {
+            return;
+          }
+
+          const changedDeviceId =
+            typeof payload.new.device_id === "string"
+              ? payload.new.device_id
+              : typeof payload.new.deviceId === "string"
+                ? payload.new.deviceId
+                : null;
+          if (changedDeviceId !== selectedDeviceId) {
+            return;
+          }
+
+          queueMetricRefresh();
+        })
+        .subscribe((status) => {
+          if (status === "SUBSCRIBED") {
+            queueMetricRefresh(0);
+          }
+        });
+    }
 
     return () => {
       active = false;
       window.clearInterval(intervalId);
+      if (queuedRefreshId !== null) {
+        window.clearTimeout(queuedRefreshId);
+      }
+      if (channel && supabase) {
+        void supabase.removeChannel(channel);
+      }
     };
   }, [selectedDeviceId]);
 
@@ -233,7 +370,7 @@ export default function App() {
           <p className="app-header__kicker">Techy Home in Merced</p>
           <h1>IOT Device Watch</h1>
         </div>
-        <p className="muted">hub-and-spoke topology | 10s telemetry polling</p>
+        <p className="muted">{`hub-and-spoke topology | live updates + ${fallbackPollingLabel} fallback polling`}</p>
       </header>
 
       <StatusStrip devices={devices} lastUpdated={lastUpdated} />

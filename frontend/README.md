@@ -17,6 +17,8 @@ Optional table name overrides:
 VITE_SUPABASE_DEVICES_TABLE=devices
 VITE_SUPABASE_METRICS_TABLE=device_metrics
 VITE_SUPABASE_ADVISORIES_TABLE=device_advisories
+VITE_DEVICE_POLL_INTERVAL_MS=2000
+VITE_METRICS_POLL_INTERVAL_MS=2000
 ```
 
 If Supabase URL/key are not set, the app falls back to the local mock API.
@@ -31,6 +33,13 @@ The schema includes:
 - Read policies for dashboard data.
 - A delete policy on `devices` so dashboard users can remove devices.
 
+Enable realtime push for dashboard updates:
+
+```sql
+alter publication supabase_realtime add table public.devices;
+alter publication supabase_realtime add table public.device_metrics;
+```
+
 ## 3. Start the app
 
 ```bash
@@ -38,4 +47,4 @@ npm install
 npm run dev
 ```
 
-The UI now pulls devices, metrics, and advisories from Supabase.
+The UI now pulls devices, metrics, and advisories from Supabase with realtime subscriptions and a polling fallback.
