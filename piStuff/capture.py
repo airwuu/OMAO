@@ -763,13 +763,11 @@ def start_monitoring(supabase_writer):
                 if not isinstance(layers, dict):
                     continue
 
+                # --- 1. EXTRACT JA3 ---
+                # Tshark JSON uses underscores for dots (tls.handshake.ja3 -> tls_handshake_ja3)
                 ja3_hash = first_value(layers, "tls_handshake_ja3")
-
-                if ja3_hash:
-                    print(f"[DEBUG] Captured JA3 Hash from {mac_addr}: {ja3_hash}") 
-                else: 
-                    print(f"[DEBUG] No JA3 hash captured.")
                 
+                # --- 2. PARSE DHCP ---
                 message_type = parse_dhcp_message_type(
                     first_value(layers, "dhcp_option_dhcp", "dhcp_option_dhcp_message_type")
                 )
@@ -780,12 +778,12 @@ def start_monitoring(supabase_writer):
                     elif udp_dstport == 68:
                         message_type = 5
 
-                if SHOW_PACKET_LOGS:
-                    log_packet_summary(data, layers, message_type, udp_dstport)
-
+                # --- 3. FILTER PACKETS ---
+                # Only proceed if it's a DHCP event OR it contains a JA3 hash
                 if message_type not in {1, 3, 5} and not ja3_hash:
                     continue
 
+                # --- 4. IDENTIFY DEVICE ---
                 mac_addr = first_value(layers, "dhcp_hw_mac_addr", "eth_src", "eth_dst")
                 if not mac_addr:
                     continue
@@ -797,7 +795,16 @@ def start_monitoring(supabase_writer):
                 hostname = first_value(layers, "dhcp_option_hostname") or previous_name
                 ip_addr = resolve_device_ip(layers, message_type, previous_ip)
 
+                # --- 5. LOG & UPLOAD ---
+                if ja3_hash:
+                    print(f"[!] TLS HANDSHAKE: Captured JA3 for {normalized_mac}: {ja3_hash}")
+                
+                if SHOW_PACKET_LOGS and message_type in {1, 3, 5}:
+                    log_packet_summary(data, layers, message_type, udp_dstport)
+
+                # This is now outside the 'if ja3' block, so it won't stop the loop
                 handle_dhcp_presence(normalized_mac, hostname, ip_addr, message_type, supabase_writer, ja3_hash)
+
         except KeyboardInterrupt:
             print("\n[*] Shutting down IoT Defender...")
         finally:
