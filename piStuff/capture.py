@@ -18,6 +18,22 @@ LOG_FILE = os.getenv("LOG_FILE", "iot_defender_dhcp.log").strip() or "iot_defend
 SUPABASE_DEVICES_TABLE = os.getenv("SUPABASE_DEVICES_TABLE", "devices").strip() or "devices"
 SUPABASE_METRICS_TABLE = os.getenv("SUPABASE_METRICS_TABLE", "device_metrics").strip() or "device_metrics"
 
+
+def read_bool_env(name: str, default_value: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default_value
+
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+
+    print(f"[!] ERROR: {name} must be a boolean value (true/false), received '{raw}'.")
+    sys.exit(1)
+
+
 def read_positive_float_env(name: str, default_value: float) -> float:
     raw = os.getenv(name, str(default_value)).strip() or str(default_value)
     try:
@@ -53,6 +69,7 @@ DISCONNECT_TIMEOUT_SEC = read_positive_float_env("DISCONNECT_TIMEOUT_SEC", 60)
 METRICS_SAMPLE_INTERVAL_SEC = read_positive_float_env("METRICS_SAMPLE_INTERVAL_SEC", 10)
 PING_COUNT = read_positive_int_env("PING_COUNT", 3)
 PING_TIMEOUT_SEC = read_positive_float_env("PING_TIMEOUT_SEC", 1)
+SHOW_PACKET_LOGS = read_bool_env("SHOW_PACKET_LOGS", True)
 DISCONNECT_SCAN_INTERVAL_SEC = min(5.0, max(1.0, DISCONNECT_TIMEOUT_SEC / 4.0))
 PING_REPLY_TIMEOUT_SEC = max(1, int(round(PING_TIMEOUT_SEC)))
 
@@ -519,6 +536,26 @@ def handle_dhcp_presence(mac_addr, hostname, ip_addr, message_type, supabase_wri
         print(f"[!] Supabase write failed for {normalized_mac}: {error}")
 
 
+def log_packet_summary(data, layers, message_type, udp_dstport):
+    timestamp = str(data.get("timestamp", "?"))
+    mac_addr = first_value(layers, "dhcp_hw_mac_addr", "eth_src", "eth_dst") or "unknown"
+    hostname = first_value(layers, "dhcp_option_hostname") or "-"
+    ip_src = first_value(layers, "ip_src") or "?"
+    ip_dst = first_value(layers, "ip_dst") or "?"
+    dhcp_labels = {
+        1: "discover",
+        2: "offer",
+        3: "request",
+        5: "ack"
+    }
+    dhcp_type = dhcp_labels.get(message_type, str(message_type) if message_type is not None else "unknown")
+    udp_text = str(udp_dstport) if udp_dstport is not None else "?"
+    print(
+        f"[pkt] ts={timestamp} dhcp={dhcp_type} udp_dst={udp_text} "
+        f"mac={mac_addr} ip={ip_src}->{ip_dst} host={hostname}"
+    )
+
+
 def start_monitoring(supabase_writer):
     print(f"[*] Starting IoT Defender on interface '{NETWORK_INTERFACE}'...")
     print("[*] Filtering for DHCP Discover/Request (new joins + reconnects)...")
@@ -527,6 +564,7 @@ def start_monitoring(supabase_writer):
     print(f"[*] Metrics sample interval: {METRICS_SAMPLE_INTERVAL_SEC:.1f} seconds")
     print(f"[*] Ping probe config: count={PING_COUNT}, timeout={PING_TIMEOUT_SEC:.1f}s")
     print(f"[*] Logging raw packet output to '{LOG_FILE}'")
+    print(f"[*] Packet logs to stdout: {'enabled' if SHOW_PACKET_LOGS else 'disabled'}")
 
     # Tshark command focused on DHCP handshake packets.
     tshark_cmd = [
@@ -590,6 +628,9 @@ def start_monitoring(supabase_writer):
                         message_type = 3
                     elif udp_dstport == 68:
                         message_type = 5
+
+                if SHOW_PACKET_LOGS:
+                    log_packet_summary(data, layers, message_type, udp_dstport)
 
                 if message_type not in {1, 3, 5}:
                     continue

@@ -36,6 +36,7 @@ export DISCONNECT_TIMEOUT_SEC="60"
 export METRICS_SAMPLE_INTERVAL_SEC="10"
 export PING_COUNT="3"
 export PING_TIMEOUT_SEC="1"
+export SHOW_PACKET_LOGS="true"
 ```
 
 Notes:
