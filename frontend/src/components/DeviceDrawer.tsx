@@ -1,7 +1,7 @@
+import { memo } from "react";
 import type { Device, DeviceAdvisoryReport, DeviceMetricsSeries } from "../types";
 import { STATUS_META, statusToClass } from "../utils/status";
 import { AdvisoryPanel } from "./AdvisoryPanel";
-import { MetricCard } from "./MetricCard";
 
 interface DeviceDrawerProps {
   device: Device | null;
@@ -15,7 +15,7 @@ interface DeviceDrawerProps {
   onClose: () => void;
 }
 
-export function DeviceDrawer({
+export const DeviceDrawer = memo(function DeviceDrawer({
   device,
   metrics,
   metricsLoading,
@@ -67,4 +67,4 @@ export function DeviceDrawer({
       </div>
     </aside>
   );
-}
+});

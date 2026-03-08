@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import ForceGraph2D from "react-force-graph-2d";
 import type { Device, DeviceMetricsSeries } from "../types";
 import { buildGraphData, syncGraphData, type GraphData, type GraphNode } from "../utils/graph";
@@ -29,7 +29,7 @@ const FOCUS_ZOOM_LEVEL = 2.3;
 const FOCUS_ANIMATION_MS = 850;
 const OVERVIEW_PADDING = 45;
 
-export function GraphView({
+export const GraphView = memo(function GraphView({
   devices,
   selectedDevice,
   selectedId,
@@ -41,6 +41,7 @@ export function GraphView({
 }: GraphViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const graphRef = useRef<any>(null);
+  const cursorStyleRef = useRef<"default" | "pointer">("default");
   const [size, setSize] = useState<GraphSize>(INITIAL_SIZE);
   const [graphData, setGraphData] = useState<GraphData>(() => buildGraphData(devices));
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
@@ -101,7 +102,108 @@ export function GraphView({
 
     graphRef.current.centerAt(targetX, targetY, FOCUS_ANIMATION_MS);
     graphRef.current.zoom(FOCUS_ZOOM_LEVEL, FOCUS_ANIMATION_MS);
-  }, [selectedId]);
+  }, [graphData.nodes, selectedId]);
+
+  const handleBackgroundClick = useCallback(() => {
+    graphRef.current?.zoomToFit(FOCUS_ANIMATION_MS, OVERVIEW_PADDING);
+    onClearSelection();
+  }, [onClearSelection]);
+
+  const handleNodeHover = useCallback((node: unknown) => {
+    const typedNode = node as GraphNode | null;
+    const nextHoveredId = typedNode?.id ?? null;
+
+    setHoveredNodeId((current) => (current === nextHoveredId ? current : nextHoveredId));
+
+    const nextCursorStyle: "default" | "pointer" = typedNode ? "pointer" : "default";
+    if (cursorStyleRef.current === nextCursorStyle) {
+      return;
+    }
+
+    cursorStyleRef.current = nextCursorStyle;
+    const canvas = graphRef.current?.canvas?.() as HTMLCanvasElement | undefined;
+    if (canvas) {
+      canvas.style.cursor = nextCursorStyle;
+    }
+  }, []);
+
+  const handleNodeClick = useCallback(
+    (node: unknown) => {
+      const typedNode = node as GraphNode;
+
+      if (typedNode.kind === "hub") {
+        graphRef.current?.zoomToFit(FOCUS_ANIMATION_MS, OVERVIEW_PADDING);
+        onClearSelection();
+        return;
+      }
+
+      if (typedNode.kind === "device" && typedNode.device) {
+        const targetX = typedNode.x ?? typedNode.fx ?? 0;
+        const targetY = typedNode.y ?? typedNode.fy ?? 0;
+        graphRef.current?.centerAt(targetX, targetY, FOCUS_ANIMATION_MS);
+        graphRef.current?.zoom(FOCUS_ZOOM_LEVEL, FOCUS_ANIMATION_MS);
+        onSelect(typedNode.device);
+      }
+    },
+    [onClearSelection, onSelect]
+  );
+
+  const getNodeLabel = useCallback((node: unknown) => {
+    const typedNode = node as GraphNode;
+    if (typedNode.kind === "hub") {
+      return typedNode.label;
+    }
+
+    const status = typedNode.device?.status ?? "good";
+    return `${typedNode.label} (${status})`;
+  }, []);
+
+  const drawNode = useCallback(
+    (node: unknown, ctx: CanvasRenderingContext2D) => {
+      const typedNode = node as GraphNode;
+      const label = typedNode.label;
+      const isHub = typedNode.kind === "hub";
+      const isHovered = typedNode.id === hoveredNodeId;
+
+      const baseRadius = isHub ? 16 : 10;
+      const radius = isHovered ? baseRadius + 2 : baseRadius;
+      const nodeStatus = typedNode.device?.status ?? "good";
+      const color = isHub ? "#9BFF9B" : STATUS_META[nodeStatus].color;
+      const glow = isHub ? "rgba(155, 255, 155, 0.55)" : STATUS_META[nodeStatus].glow;
+
+      ctx.beginPath();
+      ctx.arc(typedNode.x ?? 0, typedNode.y ?? 0, radius, 0, 2 * Math.PI, false);
+      ctx.fillStyle = color;
+      ctx.shadowColor = glow;
+      ctx.shadowBlur = isHovered ? 20 : 14;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      if (isHovered) {
+        ctx.beginPath();
+        ctx.arc(typedNode.x ?? 0, typedNode.y ?? 0, radius + 5, 0, 2 * Math.PI, false);
+        ctx.strokeStyle = "rgba(248, 243, 107, 0.9)";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+
+      if (!isHub && typedNode.id === selectedId) {
+        ctx.beginPath();
+        ctx.arc(typedNode.x ?? 0, typedNode.y ?? 0, radius + 4, 0, 2 * Math.PI, false);
+        ctx.strokeStyle = "#F8F36B";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      const fontSize = isHub ? 12 : 9;
+      const labelOffset = radius + fontSize + 4;
+      ctx.font = `${fontSize}px "Share Tech Mono", monospace`;
+      ctx.fillStyle = "#B8FFB8";
+      ctx.textAlign = "center";
+      ctx.fillText(label, typedNode.x ?? 0, (typedNode.y ?? 0) + labelOffset);
+    },
+    [hoveredNodeId, selectedId]
+  );
 
   return (
     <section className="graph-shell" aria-label="IoT topology graph">
@@ -120,92 +222,13 @@ export function GraphView({
           backgroundColor="transparent"
           linkColor={() => "rgba(108, 255, 108, 0.25)"}
           linkWidth={1}
-          cooldownTicks={5}
+          cooldownTicks={0}
           nodeRelSize={6}
-          onBackgroundClick={() => {
-            graphRef.current?.zoomToFit(FOCUS_ANIMATION_MS, OVERVIEW_PADDING);
-            onClearSelection();
-          }}
-          onNodeHover={(node) => {
-            const typedNode = node as GraphNode | null;
-            const nextHoveredId = typedNode?.id ?? null;
-
-            setHoveredNodeId((current) => (current === nextHoveredId ? current : nextHoveredId));
-
-            const canvas = graphRef.current?.canvas?.() as HTMLCanvasElement | undefined;
-            if (canvas) {
-              canvas.style.cursor = typedNode ? "pointer" : "default";
-            }
-          }}
-          onNodeClick={(node) => {
-            const typedNode = node as GraphNode;
-
-            if (typedNode.kind === "hub") {
-              graphRef.current?.zoomToFit(FOCUS_ANIMATION_MS, OVERVIEW_PADDING);
-              onClearSelection();
-              return;
-            }
-
-            if (typedNode.kind === "device" && typedNode.device) {
-              const targetX = typedNode.x ?? typedNode.fx ?? 0;
-              const targetY = typedNode.y ?? typedNode.fy ?? 0;
-              graphRef.current?.centerAt(targetX, targetY, FOCUS_ANIMATION_MS);
-              graphRef.current?.zoom(FOCUS_ZOOM_LEVEL, FOCUS_ANIMATION_MS);
-              onSelect(typedNode.device);
-            }
-          }}
-          nodeLabel={(node) => {
-            const typedNode = node as GraphNode;
-            if (typedNode.kind === "hub") {
-              return typedNode.label;
-            }
-
-            const status = typedNode.device?.status ?? "good";
-            return `${typedNode.label} (${status})`;
-          }}
-          nodeCanvasObject={(node, ctx) => {
-            const typedNode = node as GraphNode;
-            const label = typedNode.label;
-            const isHub = typedNode.kind === "hub";
-            const isHovered = typedNode.id === hoveredNodeId;
-
-            const baseRadius = isHub ? 16 : 10;
-            const radius = isHovered ? baseRadius + 2 : baseRadius;
-            const nodeStatus = typedNode.device?.status ?? "good";
-            const color = isHub ? "#9BFF9B" : STATUS_META[nodeStatus].color;
-            const glow = isHub ? "rgba(155, 255, 155, 0.55)" : STATUS_META[nodeStatus].glow;
-
-            ctx.beginPath();
-            ctx.arc(node.x ?? 0, node.y ?? 0, radius, 0, 2 * Math.PI, false);
-            ctx.fillStyle = color;
-            ctx.shadowColor = glow;
-            ctx.shadowBlur = isHovered ? 20 : 14;
-            ctx.fill();
-            ctx.shadowBlur = 0;
-
-            if (isHovered) {
-              ctx.beginPath();
-              ctx.arc(node.x ?? 0, node.y ?? 0, radius + 5, 0, 2 * Math.PI, false);
-              ctx.strokeStyle = "rgba(248, 243, 107, 0.9)";
-              ctx.lineWidth = 1.5;
-              ctx.stroke();
-            }
-
-            if (!isHub && typedNode.id === selectedId) {
-              ctx.beginPath();
-              ctx.arc(node.x ?? 0, node.y ?? 0, radius + 4, 0, 2 * Math.PI, false);
-              ctx.strokeStyle = "#F8F36B";
-              ctx.lineWidth = 2;
-              ctx.stroke();
-            }
-
-            const fontSize = isHub ? 12 : 9;
-            const labelOffset = radius + fontSize + 4;
-            ctx.font = `${fontSize}px "Share Tech Mono", monospace`;
-            ctx.fillStyle = "#B8FFB8";
-            ctx.textAlign = "center";
-            ctx.fillText(label, node.x ?? 0, (node.y ?? 0) + labelOffset);
-          }}
+          onBackgroundClick={handleBackgroundClick}
+          onNodeHover={handleNodeHover}
+          onNodeClick={handleNodeClick}
+          nodeLabel={getNodeLabel}
+          nodeCanvasObject={drawNode}
         />
       </div>
       <GraphMetricsOverlay
@@ -216,4 +239,4 @@ export function GraphView({
       />
     </section>
   );
-}
+});
