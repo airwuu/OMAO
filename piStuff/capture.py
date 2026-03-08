@@ -1103,7 +1103,7 @@ def start_monitoring(supabase_writer):
                 mac_addr = first_value(layers, "dhcp_hw_mac_addr", "eth_src", "eth_dst")
                 if ja3_hash:
                     preview_mac = normalize_mac(mac_addr) if mac_addr else "unknown"
-                    print(f"\n JA3 captured: {ja3_hash} from {preview_mac}")
+                    print(f"\n JA3 captured: {ja3_hash} from TLS handshake")
 
                 message_type = parse_dhcp_message_type(
                     first_value(layers, "dhcp_option_dhcp", "dhcp_option_dhcp_message_type")
