@@ -80,6 +80,8 @@ PING_TIMEOUT_SEC = read_positive_float_env("PING_TIMEOUT_SEC", 1)
 SHOW_PACKET_LOGS = read_bool_env("SHOW_PACKET_LOGS", True)
 DISCONNECT_SCAN_INTERVAL_SEC = min(2.0, max(0.5, DISCONNECT_TIMEOUT_SEC / 8.0))
 PING_REPLY_TIMEOUT_SEC = max(1, int(round(PING_TIMEOUT_SEC)))
+# Hard fail-safe: any espressif-named device above this traffic rate is blocked immediately.
+ESPRESSIF_HARD_BLOCK_KBPS = 20000.0
 
 PING_PACKET_LOSS_PATTERN = re.compile(r"(\d+(?:\.\d+)?)%\s*packet loss")
 PING_AVERAGE_RTT_PATTERN = re.compile(r"=\s*[\d.]+/([\d.]+)/[\d.]+/[\d.]+\s*ms")
@@ -635,6 +637,25 @@ def metrics_worker(stop_event, supabase_writer):
             except Exception as error:
                 print(f"[!] Supabase metric write failed for {mac_addr}: {error}")
 
+            hostname = str(snapshot.get("name", "Unknown"))
+            if (
+                snapshot.get("status") != "blocked"
+                and is_espressif_name(hostname)
+                and network_activity_kbps > ESPRESSIF_HARD_BLOCK_KBPS
+            ):
+                handle_anomaly(
+                    mac_addr,
+                    hostname,
+                    ip_addr,
+                    (
+                        f"Traffic exceeded hard limit: "
+                        f"{network_activity_kbps:.1f} KBPS > {ESPRESSIF_HARD_BLOCK_KBPS:.1f} KBPS"
+                    ),
+                    supabase_writer
+                )
+                # Avoid immediately writing the device back to "good" in this same loop.
+                continue
+
             if not success:
                 continue
 
@@ -1002,6 +1023,7 @@ def start_monitoring(supabase_writer):
     print(f"[*] Anomaly analysis interval: {ANOMALY_CHECK_INTERVAL_SEC:.1f} seconds")
     print("[*] Anomaly baseline: first 60s after connect/reconnect (espressif devices only)")
     print("[*] Blocking policy: only device names containing 'espressif' can be blocked")
+    print(f"[*] Hard block policy: espressif devices > {ESPRESSIF_HARD_BLOCK_KBPS:.0f} KBPS are blocked")
     print(f"[*] Ping probe config: count={PING_COUNT}, timeout={PING_TIMEOUT_SEC:.1f}s")
     print(f"[*] Logging raw packet output to '{LOG_FILE}'")
     print(f"[*] Packet logs to stdout: {'enabled' if SHOW_PACKET_LOGS else 'disabled'}")
