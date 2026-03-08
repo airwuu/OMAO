@@ -25,8 +25,12 @@ create table if not exists public.device_metrics (
   recorded_at timestamptz not null default now(),
   latency_ms numeric not null default 0,
   packet_loss_pct numeric not null default 0,
-  block_events integer not null default 0
+  block_events integer not null default 0,
+  network_activity_kbps numeric not null default 0
 );
+
+alter table public.device_metrics
+  add column if not exists network_activity_kbps numeric not null default 0;
 
 create index if not exists device_metrics_device_id_recorded_at_idx
   on public.device_metrics (device_id, recorded_at desc);

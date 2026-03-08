@@ -45,6 +45,7 @@ Notes:
 - Duplicate suppression only applies to short DHCP bursts. DHCP ACK-style packets can still refresh IP quickly.
 - Devices are marked `disconnected` after `DISCONNECT_TIMEOUT_SEC` of inactivity.
 - Active ping probes generate the latency/packet-loss series shown in the dashboard.
+- Passive traffic capture generates per-device `network_activity_kbps` so heavy internet usage is visible.
 
 ## 3) Run
 
@@ -61,6 +62,6 @@ sudo -E python3 piStuff/capture.py
 On DHCP activity and metrics intervals:
 
 - Upsert `devices` by `id` (deterministic from MAC).
-- Insert periodic `device_metrics` rows from active ping probes.
+- Insert periodic `device_metrics` rows with latency, packet loss, block events, and `network_activity_kbps`.
 - `status` is `blocked` when threat intel marks the device malicious, `good` when healthy, and `disconnected` after inactivity timeout.
 - Device IP is refreshed from DHCP/server response packets so `wlan0` clients do not stay at `0.0.0.0`.

@@ -133,6 +133,7 @@ function mapMetricPoint(row: JsonRecord): {
   latencyMs: number;
   packetLossPct: number;
   blockEvents: number;
+  networkActivityKbps: number;
 } | null {
   const timestamp = readString(row, "recorded_at", "timestamp", "created_at", "createdAt");
   if (!timestamp) {
@@ -143,7 +144,15 @@ function mapMetricPoint(row: JsonRecord): {
     timestamp,
     latencyMs: readNumber(row, "latency_ms", "latencyMs", "latency") ?? 0,
     packetLossPct: readNumber(row, "packet_loss_pct", "packetLossPct", "packet_loss", "packetLoss") ?? 0,
-    blockEvents: readNumber(row, "block_events", "blockEvents", "blocked_events", "blockedEvents") ?? 0
+    blockEvents: readNumber(row, "block_events", "blockEvents", "blocked_events", "blockedEvents") ?? 0,
+    networkActivityKbps:
+      readNumber(
+        row,
+        "network_activity_kbps",
+        "networkActivityKbps",
+        "throughput_kbps",
+        "throughputKbps"
+      ) ?? 0
   };
 }
 
@@ -180,7 +189,8 @@ function mapMetricSeries(deviceId: string, rows: JsonRecord[]): DeviceMetricsSer
     range: API_RANGE,
     latencyMs: toSeries((point) => point.latencyMs),
     packetLossPct: toSeries((point) => point.packetLossPct),
-    blockEvents: toSeries((point) => point.blockEvents)
+    blockEvents: toSeries((point) => point.blockEvents),
+    networkActivityKbps: toSeries((point) => point.networkActivityKbps)
   };
 }
 

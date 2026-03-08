@@ -78,6 +78,7 @@ export function GraphMetricsOverlay({
         <div className="graph-mini-metrics-grid">
           <MiniMetric title="Latency" unit="ms" data={metrics.latencyMs} stroke="#6CFF6C" />
           <MiniMetric title="Packet Loss" unit="%" data={metrics.packetLossPct} stroke="#F8F36B" />
+          <MiniMetric title="Net Activity" unit="kbps" data={metrics.networkActivityKbps} stroke="#7BB8FF" />
           <MiniMetric title="Block Events" unit="count" data={metrics.blockEvents} stroke="#FF6464" />
         </div>
       ) : null}

@@ -80,6 +80,8 @@ PING_AVERAGE_RTT_PATTERN = re.compile(r"=\s*[\d.]+/([\d.]+)/[\d.]+/[\d.]+\s*ms")
 recent_devices: dict[str, float] = {}
 device_registry: dict[str, dict[str, object]] = {}
 device_registry_lock = threading.Lock()
+traffic_counters: dict[str, dict[str, int]] = {}
+traffic_counters_lock = threading.Lock()
 
 
 def check_threat_intel(mac_addr, hostname):
@@ -294,7 +296,7 @@ class SupabaseWriter:
             "resolution=merge-duplicates,return=minimal"
         )
 
-    def insert_metric(self, device_id, latency_ms, packet_loss_pct, block_events=0):
+    def insert_metric(self, device_id, latency_ms, packet_loss_pct, block_events=0, network_activity_kbps=0.0):
         timestamp = current_timestamp_utc()
 
         metric_row = [{
@@ -302,7 +304,8 @@ class SupabaseWriter:
             "recorded_at": timestamp,
             "latency_ms": round(float(latency_ms), 2),
             "packet_loss_pct": round(float(packet_loss_pct), 2),
-            "block_events": int(block_events)
+            "block_events": int(block_events),
+            "network_activity_kbps": round(float(network_activity_kbps), 2)
         }]
 
         self._post(
@@ -396,6 +399,40 @@ def mark_disconnected_devices():
     return disconnected_snapshots
 
 
+def record_network_activity(src_mac, dst_mac, frame_bytes):
+    if frame_bytes <= 0:
+        return
+
+    tracked_src = False
+    tracked_dst = False
+    with device_registry_lock:
+        tracked_src = src_mac in device_registry
+        tracked_dst = dst_mac in device_registry
+
+    if not tracked_src and not tracked_dst:
+        return
+
+    with traffic_counters_lock:
+        if tracked_src:
+            src_counter = traffic_counters.setdefault(src_mac, {"upload_bytes": 0, "download_bytes": 0})
+            src_counter["upload_bytes"] += frame_bytes
+
+        if tracked_dst:
+            dst_counter = traffic_counters.setdefault(dst_mac, {"upload_bytes": 0, "download_bytes": 0})
+            dst_counter["download_bytes"] += frame_bytes
+
+
+def consume_network_activity(mac_addr):
+    with traffic_counters_lock:
+        counters = traffic_counters.setdefault(mac_addr, {"upload_bytes": 0, "download_bytes": 0})
+        upload_bytes = int(counters.get("upload_bytes", 0))
+        download_bytes = int(counters.get("download_bytes", 0))
+        counters["upload_bytes"] = 0
+        counters["download_bytes"] = 0
+
+    return upload_bytes, download_bytes
+
+
 def probe_device(ip_addr):
     ping_cmd = [
         "ping",
@@ -450,8 +487,18 @@ def metrics_worker(stop_event, supabase_writer):
             ip_addr = str(snapshot["ip"])
 
             latency_ms, packet_loss_pct, success = probe_device(ip_addr)
+            upload_bytes, download_bytes = consume_network_activity(mac_addr)
+            network_activity_kbps = (
+                ((upload_bytes + download_bytes) * 8.0) / (METRICS_SAMPLE_INTERVAL_SEC * 1000.0)
+            )
             try:
-                supabase_writer.insert_metric(device_id, latency_ms, packet_loss_pct, 0)
+                supabase_writer.insert_metric(
+                    device_id,
+                    latency_ms,
+                    packet_loss_pct,
+                    0,
+                    network_activity_kbps
+                )
             except Exception as error:
                 print(f"[!] Supabase metric write failed for {mac_addr}: {error}")
 
@@ -475,6 +522,57 @@ def metrics_worker(stop_event, supabase_writer):
                 )
             except Exception as error:
                 print(f"[!] Supabase liveness update failed for {mac_addr}: {error}")
+
+
+def network_activity_worker(stop_event):
+    tshark_cmd = [
+        "tshark", "-l", "-i", NETWORK_INTERFACE,
+        "-T", "ek",
+        "-f", "ip",
+        "-e", "eth.src",
+        "-e", "eth.dst",
+        "-e", "frame.len"
+    ]
+
+    process = subprocess.Popen(
+        tshark_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True
+    )
+
+    if process.stdout is None:
+        print("[!] ERROR: Unable to read traffic tshark output stream.")
+        return
+
+    try:
+        for line in process.stdout:
+            if stop_event.is_set():
+                break
+
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            layers = data.get("layers")
+            if not isinstance(layers, dict):
+                continue
+
+            src_mac = first_value(layers, "eth_src")
+            dst_mac = first_value(layers, "eth_dst")
+            frame_len = parse_integer(first_value(layers, "frame_len", "frame_cap_len", "frame_frame_len"))
+
+            if not src_mac or not dst_mac or frame_len is None:
+                continue
+
+            record_network_activity(normalize_mac(src_mac), normalize_mac(dst_mac), frame_len)
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
 
 
 def disconnect_worker(stop_event, supabase_writer):
@@ -530,7 +628,7 @@ def handle_dhcp_presence(mac_addr, hostname, ip_addr, message_type, supabase_wri
             str(snapshot["status"])
         )
         if is_malicious:
-            supabase_writer.insert_metric(str(snapshot["id"]), 0.0, 0.0, 1)
+            supabase_writer.insert_metric(str(snapshot["id"]), 0.0, 0.0, 1, 0.0)
         print(f"[*] Supabase updated for device {normalized_mac} ({snapshot['status']}).")
     except Exception as error:
         print(f"[!] Supabase write failed for {normalized_mac}: {error}")
@@ -565,6 +663,7 @@ def start_monitoring(supabase_writer):
     print(f"[*] Ping probe config: count={PING_COUNT}, timeout={PING_TIMEOUT_SEC:.1f}s")
     print(f"[*] Logging raw packet output to '{LOG_FILE}'")
     print(f"[*] Packet logs to stdout: {'enabled' if SHOW_PACKET_LOGS else 'disabled'}")
+    print("[*] Network activity capture: enabled (per-device kbps)")
 
     # Tshark command focused on DHCP handshake packets.
     tshark_cmd = [
@@ -596,12 +695,18 @@ def start_monitoring(supabase_writer):
         args=(stop_event, supabase_writer),
         daemon=True
     )
+    traffic_thread = threading.Thread(
+        target=network_activity_worker,
+        args=(stop_event,),
+        daemon=True
+    )
     disconnect_thread = threading.Thread(
         target=disconnect_worker,
         args=(stop_event, supabase_writer),
         daemon=True
     )
     metrics_thread.start()
+    traffic_thread.start()
     disconnect_thread.start()
 
     with open(LOG_FILE, "a", encoding="utf-8") as log_file:
@@ -658,6 +763,7 @@ def start_monitoring(supabase_writer):
                 process.kill()
 
             metrics_thread.join(timeout=2)
+            traffic_thread.join(timeout=2)
             disconnect_thread.join(timeout=2)
 
 

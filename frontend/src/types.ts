@@ -25,6 +25,7 @@ export interface DeviceMetricsSeries {
   latencyMs: TimeSeriesPoint[];
   packetLossPct: TimeSeriesPoint[];
   blockEvents: TimeSeriesPoint[];
+  networkActivityKbps: TimeSeriesPoint[];
 }
 
 export interface AdvisoryItem {

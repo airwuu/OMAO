@@ -210,10 +210,12 @@ function metricsFor(deviceId: string, status: DeviceStatus) {
   const latencyMs: Array<{ timestamp: string; value: number }> = [];
   const packetLossPct: Array<{ timestamp: string; value: number }> = [];
   const blockEvents: Array<{ timestamp: string; value: number }> = [];
+  const networkActivityKbps: Array<{ timestamp: string; value: number }> = [];
 
   const latencyBase = status === "good" ? 18 : status === "suspicious" ? 110 : 360;
   const lossBase = status === "good" ? 0.3 : status === "suspicious" ? 3.5 : 22;
   const blockBase = status === "blocked" ? 2 : status === "suspicious" ? 0.4 : 0;
+  const trafficBase = status === "blocked" ? 180 : status === "suspicious" ? 760 : 340;
 
   for (let offset = samples - 1; offset >= 0; offset -= 1) {
     let randomValue: number;
@@ -229,12 +231,16 @@ function metricsFor(deviceId: string, status: DeviceStatus) {
     [seed, randomValue] = nextRandom(seed);
     const events = Math.max(0, Math.round(blockBase + randomValue * (status === "blocked" ? 2 : 1)));
 
+    [seed, randomValue] = nextRandom(seed);
+    const activity = Math.max(8, Math.round(trafficBase + drift * 8 + randomValue * (status === "blocked" ? 220 : 640)));
+
     latencyMs.push({ timestamp, value: latency });
     packetLossPct.push({ timestamp, value: loss });
     blockEvents.push({ timestamp, value: events });
+    networkActivityKbps.push({ timestamp, value: activity });
   }
 
-  return { deviceId, range: "1h", latencyMs, packetLossPct, blockEvents };
+  return { deviceId, range: "1h", latencyMs, packetLossPct, blockEvents, networkActivityKbps };
 }
 
 function advisoryFor(deviceId: string, status: DeviceStatus) {

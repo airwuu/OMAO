@@ -46,7 +46,8 @@ describe("DeviceDrawer", () => {
           range: "1h",
           latencyMs: [{ timestamp: "2026-03-07T00:00:00.000Z", value: 20 }],
           packetLossPct: [{ timestamp: "2026-03-07T00:00:00.000Z", value: 0.3 }],
-          blockEvents: [{ timestamp: "2026-03-07T00:00:00.000Z", value: 0 }]
+          blockEvents: [{ timestamp: "2026-03-07T00:00:00.000Z", value: 0 }],
+          networkActivityKbps: [{ timestamp: "2026-03-07T00:00:00.000Z", value: 420 }]
         }}
         metricsLoading={false}
         metricsError={null}
