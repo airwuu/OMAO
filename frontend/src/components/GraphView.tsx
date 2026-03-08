@@ -28,6 +28,11 @@ const INITIAL_SIZE: GraphSize = {
 const FOCUS_ZOOM_LEVEL = 2.3;
 const FOCUS_ANIMATION_MS = 850;
 const OVERVIEW_PADDING = 45;
+const NODE_HITBOX_PADDING_PX = 12;
+
+function getBaseNodeRadius(node: GraphNode): number {
+  return node.kind === "hub" ? 16 : 10;
+}
 
 export const GraphView = memo(function GraphView({
   devices,
@@ -165,7 +170,7 @@ export const GraphView = memo(function GraphView({
       const isHub = typedNode.kind === "hub";
       const isHovered = typedNode.id === hoveredNodeId;
 
-      const baseRadius = isHub ? 16 : 10;
+      const baseRadius = getBaseNodeRadius(typedNode);
       const radius = isHovered ? baseRadius + 2 : baseRadius;
       const nodeStatus = typedNode.device?.status ?? "good";
       const color = isHub ? "#9BFF9B" : STATUS_META[nodeStatus].color;
@@ -205,6 +210,20 @@ export const GraphView = memo(function GraphView({
     [hoveredNodeId, selectedId]
   );
 
+  const paintNodePointerArea = useCallback(
+    (node: unknown, color: string, ctx: CanvasRenderingContext2D, globalScale: number) => {
+      const typedNode = node as GraphNode;
+      const visibleRadius = getBaseNodeRadius(typedNode) + 2;
+      const hitboxRadius = visibleRadius + NODE_HITBOX_PADDING_PX / Math.max(globalScale, 0.1);
+
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(typedNode.x ?? 0, typedNode.y ?? 0, hitboxRadius, 0, 2 * Math.PI, false);
+      ctx.fill();
+    },
+    []
+  );
+
   return (
     <section className="graph-shell" aria-label="IoT topology graph">
       <div className="legend" aria-label="Severity legend">
@@ -229,6 +248,7 @@ export const GraphView = memo(function GraphView({
           onNodeClick={handleNodeClick}
           nodeLabel={getNodeLabel}
           nodeCanvasObject={drawNode}
+          nodePointerAreaPaint={paintNodePointerArea}
         />
       </div>
       <GraphMetricsOverlay
