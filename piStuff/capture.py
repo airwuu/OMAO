@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from mac_vendor_lookup import MacLookup
 
 # --- CONFIGURATION ---
 NETWORK_INTERFACE = os.getenv("NETWORK_INTERFACE", "eth0").strip() or "eth0"
@@ -82,6 +83,9 @@ device_registry: dict[str, dict[str, object]] = {}
 device_registry_lock = threading.Lock()
 traffic_counters: dict[str, dict[str, int]] = {}
 traffic_counters_lock = threading.Lock()
+
+# Initialize the vendor lookup tool globally
+vendor_scanner = MacLookup() 
 
 
 def check_threat_intel(mac_addr, hostname):
@@ -779,6 +783,13 @@ if __name__ == "__main__":
     if shutil.which("ping") is None:
         print("[!] ERROR: ping is not installed. Please install iputils-ping.")
         sys.exit(1)
+
+    try:
+        print("[*] Loading MAC vendor database...")
+        # This will use the local cache or download updates if connected to internet
+        vendor_scanner.update_vendors() 
+    except Exception as e:
+        print(f"[!] Warning: Could not update vendor list: {e}. Using local cache.")
 
     supabase_url = required_env("SUPABASE_URL")
     supabase_service_role_key = required_env("SUPABASE_SERVICE_ROLE_KEY")
