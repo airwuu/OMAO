@@ -73,7 +73,8 @@ def read_positive_int_env(name: str, default_value: int) -> int:
 DHCP_DUPLICATE_WINDOW_SEC = read_positive_float_env("DHCP_DUPLICATE_WINDOW_SEC", 20)
 DISCONNECT_TIMEOUT_SEC = read_positive_float_env("DISCONNECT_TIMEOUT_SEC", 15)
 METRICS_SAMPLE_INTERVAL_SEC = read_positive_float_env("METRICS_SAMPLE_INTERVAL_SEC", 5)
-ANOMALY_CHECK_INTERVAL_SEC = read_positive_float_env("ANOMALY_CHECK_INTERVAL_SEC", 10)
+# Fixed cadence for anomaly checks to keep baseline behavior consistent.
+ANOMALY_CHECK_INTERVAL_SEC = 60.0
 PING_COUNT = read_positive_int_env("PING_COUNT", 3)
 PING_TIMEOUT_SEC = read_positive_float_env("PING_TIMEOUT_SEC", 1)
 SHOW_PACKET_LOGS = read_bool_env("SHOW_PACKET_LOGS", True)
@@ -92,7 +93,9 @@ traffic_counters_lock = threading.Lock()
 
 # Traffic analysis trackers
 traffic_short_term: dict[str, dict[str, int]] = {}
-traffic_long_term: dict[str, dict[str, int]] = {}
+# Per-device anomaly profile:
+# collecting -> first minute after connect/reconnect, active -> compare against captured baseline.
+traffic_profiles: dict[str, dict[str, object]] = {}
 traffic_analysis_lock = threading.Lock()
 
 # Initialize the vendor lookup tool globally
@@ -166,6 +169,10 @@ def fallback_device_name(hostname, mac_addr):
     compact = "".join(character for character in mac_addr if character.isalnum())
     suffix = compact[-6:] if compact else "unknown"
     return f"device-{suffix}"
+
+
+def is_espressif_name(hostname):
+    return "espressif" in str(hostname or "").strip().lower()
 
 
 def first_value(layers, *keys):
@@ -309,28 +316,34 @@ class SupabaseWriter:
         except urllib.error.URLError as error:
             raise RuntimeError(f"Supabase request error for {path}: {error.reason}") from error
 
-    def _get(self, path):
+    def _patch(self, path, payload, prefer_header="return=representation"):
         endpoint = f"{self.base_url}{path}"
         request = urllib.request.Request(
             endpoint,
-            method="GET"
+            data=json.dumps(payload).encode("utf-8"),
+            method="PATCH"
         )
         request.add_header("apikey", self.service_role_key)
         request.add_header("Authorization", f"Bearer {self.service_role_key}")
         request.add_header("Content-Type", "application/json")
+        request.add_header("Prefer", prefer_header)
 
         try:
             with urllib.request.urlopen(request, timeout=10) as response:
                 if response.status >= 300:
                     response_body = response.read().decode("utf-8", errors="replace")
                     raise RuntimeError(
-                        f"Supabase GET failed ({response.status}) for {path}: {response_body}"
+                        f"Supabase PATCH failed ({response.status}) for {path}: {response_body}"
                     )
-                return json.loads(response.read().decode("utf-8"))
+
+                response_text = response.read().decode("utf-8", errors="replace").strip()
+                if not response_text:
+                    return []
+                return json.loads(response_text)
         except urllib.error.HTTPError as error:
             response_body = error.read().decode("utf-8", errors="replace")
             raise RuntimeError(
-                f"Supabase GET failed ({error.code}) for {path}: {response_body}"
+                f"Supabase PATCH failed ({error.code}) for {path}: {response_body}"
             ) from error
         except urllib.error.URLError as error:
             raise RuntimeError(f"Supabase request error for {path}: {error.reason}") from error
@@ -399,29 +412,38 @@ class SupabaseWriter:
 
 
     def update_device_baseline(self, device_id, baseline_dict, avg_pkts):
-        # Dedicated method to update just the learned baseline fields
-        payload = [{
-            "id": device_id,
+        payload = {
             "traffic_baseline": baseline_dict,
             "avg_pkts_per_sec": round(float(avg_pkts), 2)
-        }]
-        
-        # Merge duplicates minimal return updates existing rows based on the id
-        self._post(
-            f"/rest/v1/{self.encoded_devices_table}?on_conflict=id",
+        }
+        encoded_id = urllib.parse.quote(str(device_id), safe="")
+        updated_rows = self._patch(
+            f"/rest/v1/{self.encoded_devices_table}?id=eq.{encoded_id}",
             payload,
-            "resolution=merge-duplicates,return=minimal"
+            "return=representation"
         )
+        if not updated_rows:
+            print(f"[!] Skipping baseline sync for missing device row: {device_id}")
         
-    def get_all_baselines(self):
-        # Fetch mac, traffic_baseline, and avg_pkts_per_sec for all devices
-        return self._get(f"/rest/v1/{self.encoded_devices_table}?select=mac,traffic_baseline,avg_pkts_per_sec")
-
-
 def get_registry_snapshot_for_mac(mac_addr):
     with device_registry_lock:
         state = device_registry.get(mac_addr)
         return dict(state) if state else None
+
+
+def reset_traffic_profile(mac_addr):
+    with traffic_analysis_lock:
+        traffic_profiles[mac_addr] = {
+            "phase": "collecting",
+            "started_epoch": time.time(),
+            "collect_total_pkts": 0,
+            "collect_ip_counts": {}
+        }
+
+
+def drop_traffic_profile(mac_addr):
+    with traffic_analysis_lock:
+        traffic_profiles.pop(mac_addr, None)
 
 
 def resolve_device_ip(layers, message_type, known_ip):
@@ -689,6 +711,10 @@ def network_activity_worker(stop_event):
 
 
 def handle_anomaly(mac_addr, hostname, ip_addr, reason, supabase_writer):
+    if not is_espressif_name(hostname):
+        print(f"[*] Ignoring anomaly for non-espressif device {mac_addr} ({hostname}).")
+        return
+
     print("\n" + "!" * 50)
     print("[!!!] ANOMALY DETECTED [!!!]")
     print(f"    MAC Address: {mac_addr}")
@@ -718,10 +744,6 @@ def handle_anomaly(mac_addr, hostname, ip_addr, reason, supabase_writer):
 
 
 def anomaly_analysis_worker(stop_event, supabase_writer):
-    # Keep a 24-hour effective learning horizon regardless of analysis interval.
-    updates_per_day = max(1.0, (24.0 * 60.0 * 60.0) / ANOMALY_CHECK_INTERVAL_SEC)
-    ALPHA = 1.0 / updates_per_day
-    warmup_updates = max(5, int(round((5.0 * 60.0) / ANOMALY_CHECK_INTERVAL_SEC)))
     packet_threshold_scale = ANOMALY_CHECK_INTERVAL_SEC / 60.0
     new_ip_packet_threshold = max(2, int(round(10 * packet_threshold_scale)))
     ratio_spike_packet_threshold = max(3, int(round(20 * packet_threshold_scale)))
@@ -752,6 +774,9 @@ def anomaly_analysis_worker(stop_event, supabase_writer):
             device_id = str(snapshot["id"])
             hostname = str(snapshot["name"])
             ip_addr = str(snapshot["ip"])
+            if not is_espressif_name(hostname):
+                # Ignore anomaly handling for non-espressif devices.
+                continue
             
             # Calculate short term total packets
             st_total_pkts = sum(short_term_ips.values())
@@ -760,95 +785,116 @@ def anomaly_analysis_worker(stop_event, supabase_writer):
                 
             st_pkts_per_sec = st_total_pkts / ANOMALY_CHECK_INTERVAL_SEC
 
-            # Safely get or initialize long term baseline for this MAC
+            baseline_to_save = None
+            avg_to_save = None
+            baseline_avg_pkts_per_sec = 0.0
+            baseline_ips = {}
+
+            # Build/consume the 1-minute post-connect baseline state.
             with traffic_analysis_lock:
-                # long_term stores: {"avg_pkts_per_sec": float, "ips": {"ip": percentage(0-1)}}
-                lt_data = traffic_long_term.setdefault(mac_addr, {
-                    "avg_pkts_per_sec": st_pkts_per_sec, # Initialize with current if empty
-                    "ips": {},
-                    "updates_count": 0
+                profile = traffic_profiles.setdefault(mac_addr, {
+                    "phase": "collecting",
+                    "started_epoch": time.time(),
+                    "collect_total_pkts": 0,
+                    "collect_ip_counts": {}
                 })
-                
-                lt_avg_pkts_per_sec = lt_data["avg_pkts_per_sec"]
-                lt_ips = lt_data["ips"]
-                updates_count = lt_data["updates_count"]
+                phase = str(profile.get("phase", "collecting"))
+                if phase == "collecting":
+                    collect_total_pkts = int(profile.get("collect_total_pkts", 0))
+                    collect_ip_counts = dict(profile.get("collect_ip_counts") or {})
+                    for ip, count in short_term_ips.items():
+                        packet_count = int(count)
+                        if packet_count <= 0:
+                            continue
+                        collect_ip_counts[ip] = int(collect_ip_counts.get(ip, 0)) + packet_count
+                        collect_total_pkts += packet_count
+
+                    profile["collect_total_pkts"] = collect_total_pkts
+                    profile["collect_ip_counts"] = collect_ip_counts
+                    started_epoch = float(profile.get("started_epoch", time.time()))
+                    elapsed = time.time() - started_epoch
+                    if elapsed < ANOMALY_CHECK_INTERVAL_SEC:
+                        continue
+
+                    if collect_total_pkts <= 0:
+                        profile["started_epoch"] = time.time()
+                        profile["collect_total_pkts"] = 0
+                        profile["collect_ip_counts"] = {}
+                        continue
+
+                    elapsed_sec = max(ANOMALY_CHECK_INTERVAL_SEC, elapsed)
+                    baseline_avg_pkts_per_sec = collect_total_pkts / elapsed_sec
+                    baseline_ips = {
+                        ip: count / collect_total_pkts
+                        for ip, count in collect_ip_counts.items()
+                        if count > 0
+                    }
+
+                    profile["phase"] = "active"
+                    profile["baseline_avg_pkts_per_sec"] = baseline_avg_pkts_per_sec
+                    profile["baseline_ips"] = baseline_ips
+                    profile.pop("collect_total_pkts", None)
+                    profile.pop("collect_ip_counts", None)
+                    baseline_to_save = dict(baseline_ips)
+                    avg_to_save = baseline_avg_pkts_per_sec
+                else:
+                    baseline_avg_pkts_per_sec = float(profile.get("baseline_avg_pkts_per_sec", 0.0))
+                    baseline_ips = dict(profile.get("baseline_ips") or {})
+
+            if baseline_to_save is not None:
+                print(
+                    f"[*] Baseline established for {mac_addr} after connect: "
+                    f"{avg_to_save:.2f} pkts/s across {len(baseline_to_save)} destination IPs."
+                )
+                try:
+                    supabase_writer.update_device_baseline(device_id, baseline_to_save, avg_to_save)
+                except Exception as error:
+                    print(f"[!] Supabase baseline update failed for {mac_addr}: {error}")
+                continue
 
             # --- Anomaly Detection Logic ---
             is_anomalous = False
             reason = ""
 
-            # Only run anomaly rules after enough baseline has accumulated (about 5 minutes).
-            if updates_count >= warmup_updates:
-                # Rule 1: Volume Spike (>300% increase over baseline)
-                # Ignore very small baselines to avoid false positives on quiet devices
-                if lt_avg_pkts_per_sec > 1.0 and st_pkts_per_sec > (lt_avg_pkts_per_sec * 3.0):
-                    is_anomalous = True
-                    reason = f"Volume spike: {st_pkts_per_sec:.1f} pkts/s (baseline: {lt_avg_pkts_per_sec:.1f} pkts/s)"
-                
-                # Rule 2: Destination IP Distribution Shifts
-                if not is_anomalous:
-                    st_distribution = {ip: count / st_total_pkts for ip, count in short_term_ips.items()}
-                    for ip, st_percentage in st_distribution.items():
-                        lt_percentage = lt_ips.get(ip, 0.0)
-                        
-                        # New IP or massively increased percentage
-                        # E.g., if it was < 1% historically, but is now > 20% of traffic
-                        if lt_percentage < 0.01 and st_percentage > 0.20:
-                            # Require a meaningful packet count in the current analysis window.
-                            if short_term_ips[ip] > new_ip_packet_threshold:
-                                is_anomalous = True
-                                reason = f"Abnormal connection to {ip} ({st_percentage*100:.1f}% of traffic, baseline {lt_percentage*100:.1f}%)"
-                                break
-                        
-                        # Existing IP ratio suddenly spiked severely (e.g. from <10% to >50%)
-                        if lt_percentage < 0.10 and st_percentage > 0.50:
-                            if short_term_ips[ip] > ratio_spike_packet_threshold:
-                                is_anomalous = True
-                                reason = f"Ratio spike to {ip} ({st_percentage*100:.1f}% of traffic, baseline {lt_percentage*100:.1f}%)"
-                                break
+            # Rule 1: Volume Spike (>300% increase over captured baseline)
+            # Ignore very small baselines to avoid false positives on quiet devices
+            if baseline_avg_pkts_per_sec > 1.0 and st_pkts_per_sec > (baseline_avg_pkts_per_sec * 3.0):
+                is_anomalous = True
+                reason = (
+                    f"Volume spike: {st_pkts_per_sec:.1f} pkts/s "
+                    f"(baseline: {baseline_avg_pkts_per_sec:.1f} pkts/s)"
+                )
 
-            # --- Trigger Alert ---
+            # Rule 2: Destination IP Distribution Shifts
+            if not is_anomalous:
+                st_distribution = {ip: count / st_total_pkts for ip, count in short_term_ips.items()}
+                for ip, st_percentage in st_distribution.items():
+                    baseline_percentage = float(baseline_ips.get(ip, 0.0))
+
+                    # New IP or massively increased percentage.
+                    if baseline_percentage < 0.01 and st_percentage > 0.20:
+                        if short_term_ips[ip] > new_ip_packet_threshold:
+                            is_anomalous = True
+                            reason = (
+                                f"Abnormal connection to {ip} "
+                                f"({st_percentage*100:.1f}% of traffic, "
+                                f"baseline {baseline_percentage*100:.1f}%)"
+                            )
+                            break
+
+                    # Existing IP ratio suddenly spiked severely.
+                    if baseline_percentage < 0.10 and st_percentage > 0.50:
+                        if short_term_ips[ip] > ratio_spike_packet_threshold:
+                            is_anomalous = True
+                            reason = (
+                                f"Ratio spike to {ip} "
+                                f"({st_percentage*100:.1f}% of traffic, "
+                                f"baseline {baseline_percentage*100:.1f}%)"
+                            )
+                            break
+
             if is_anomalous:
                 handle_anomaly(mac_addr, hostname, ip_addr, reason, supabase_writer)
-                # Skip baseline learning if anomalous
-                continue
-
-            # --- Baseline Learning (EWMA) ---
-            # Re-calculate short term distribution
-            st_distribution = {ip: count / st_total_pkts for ip, count in short_term_ips.items()}
-            
-            with traffic_analysis_lock:
-                # Update rolling average for packets per second
-                new_avg_pkts = (ALPHA * st_pkts_per_sec) + ((1 - ALPHA) * lt_data["avg_pkts_per_sec"])
-                lt_data["avg_pkts_per_sec"] = new_avg_pkts
-                
-                # Update rolling average for IP distributions
-                # First, decay all existing IPs
-                for ip in lt_data["ips"]:
-                    lt_data["ips"][ip] = lt_data["ips"][ip] * (1 - ALPHA)
-                
-                # Then add the current minute's contribution
-                for ip, st_pct in st_distribution.items():
-                    current = lt_data["ips"].get(ip, 0.0)
-                    lt_data["ips"][ip] = current + (ALPHA * st_pct)
-                    
-                # Normalize just to handle any tiny floating point drifts over time
-                total_lt_pct = sum(lt_data["ips"].values())
-                if total_lt_pct > 0:
-                    for ip in lt_data["ips"]:
-                        lt_data["ips"][ip] /= total_lt_pct
-                        
-                lt_data["updates_count"] += 1
-                
-                # Snapshot for Supabase update
-                baseline_to_save = dict(lt_data["ips"])
-                avg_to_save = lt_data["avg_pkts_per_sec"]
-
-            # Periodically (or on every update with small scale) sync baseline to Supabase
-            try:
-                supabase_writer.update_device_baseline(device_id, baseline_to_save, avg_to_save)
-            except Exception as error:
-                print(f"[!] Supabase baseline update failed for {mac_addr}: {error}")
 
 
 def disconnect_worker(stop_event, supabase_writer):
@@ -856,6 +902,7 @@ def disconnect_worker(stop_event, supabase_writer):
         snapshots = mark_disconnected_devices()
         for snapshot in snapshots:
             mac_addr = str(snapshot["mac"])
+            drop_traffic_profile(mac_addr)
             print(f"[*] Device {mac_addr} marked disconnected after {DISCONNECT_TIMEOUT_SEC:.0f}s inactivity.")
             try:
                 supabase_writer.upsert_device(
@@ -874,26 +921,41 @@ def handle_dhcp_presence(mac_addr, hostname, ip_addr, message_type, supabase_wri
     if should_skip_duplicate(normalized_mac, message_type):
         return
 
+    previous_snapshot = get_registry_snapshot_for_mac(normalized_mac)
+    resolved_hostname = fallback_device_name(hostname, normalized_mac)
+    is_block_eligible = is_espressif_name(resolved_hostname)
+    is_new_connection = (
+        previous_snapshot is None or str(previous_snapshot.get("status", "")) == "disconnected"
+    )
+
     print("\n" + "=" * 50)
     print("[!] DEVICE DHCP ACTIVITY DETECTED")
     print(f"    MAC Address: {normalized_mac}")
-    print(f"    Hostname:    {hostname}")
+    print(f"    Hostname:    {resolved_hostname}")
     print(f"    IP Address:  {ip_addr}")
     print(f"    DHCP Type:   {message_type}")
+    print(f"    Blockable:   {'yes' if is_block_eligible else 'no (name must include espressif)'}")
     print("=" * 50)
 
-    previous_snapshot = get_registry_snapshot_for_mac(normalized_mac)
-    if message_type == 5 and previous_snapshot is not None:
+    if is_new_connection and is_block_eligible:
+        reset_traffic_profile(normalized_mac)
+    elif not is_block_eligible:
+        drop_traffic_profile(normalized_mac)
+
+    if not is_block_eligible:
+        is_malicious = False
+        print(f"[*] Skipping threat checks for non-espressif device {normalized_mac}.")
+    elif message_type == 5 and previous_snapshot is not None:
         is_malicious = bool(previous_snapshot.get("is_malicious"))
     else:
-        is_malicious = check_threat_intel(normalized_mac, hostname, ja3_hash)
+        is_malicious = check_threat_intel(normalized_mac, resolved_hostname, ja3_hash)
 
     if is_malicious:
         isolate_device(normalized_mac)
     else:
         print(f"[*] Device {normalized_mac} allowed for now.")
 
-    snapshot = upsert_registry_on_presence(normalized_mac, hostname, ip_addr, is_malicious)
+    snapshot = upsert_registry_on_presence(normalized_mac, resolved_hostname, ip_addr, is_malicious)
 
     try:
         supabase_writer.upsert_device(
@@ -930,29 +992,6 @@ def log_packet_summary(data, layers, message_type, udp_dstport):
     )
 
 
-def load_baselines(supabase_writer):
-    print("[*] Syncing historical baselines from Supabase...")
-    try:
-        devices = supabase_writer.get_all_baselines()
-        loaded_count = 0
-        with traffic_analysis_lock:
-            for device in devices:
-                mac_addr = normalize_mac(device.get("mac", ""))
-                baseline_dict = dict(device.get("traffic_baseline") or {})
-                avg_pkts = float(device.get("avg_pkts_per_sec") or 0.0)
-                
-                if mac_addr and baseline_dict:
-                    traffic_long_term[mac_addr] = {
-                        "avg_pkts_per_sec": avg_pkts,
-                        "ips": baseline_dict,
-                        "updates_count": int(max(1.0, round((24.0 * 60.0 * 60.0) / ANOMALY_CHECK_INTERVAL_SEC)))
-                    }
-                    loaded_count += 1
-        print(f"[*] Successfully loaded baselines for {loaded_count} devices.")
-    except Exception as error:
-        print(f"[!] Failed to sync history from Supabase: {error}")
-
-
 def start_monitoring(supabase_writer):
     print(f"[*] Starting IoT Defender on interface '{NETWORK_INTERFACE}'...")
     print("[*] Filtering for DHCP Discover/Request (new joins + reconnects)...")
@@ -961,6 +1000,8 @@ def start_monitoring(supabase_writer):
     print(f"[*] Disconnect scan interval: {DISCONNECT_SCAN_INTERVAL_SEC:.1f} seconds")
     print(f"[*] Metrics sample interval: {METRICS_SAMPLE_INTERVAL_SEC:.1f} seconds")
     print(f"[*] Anomaly analysis interval: {ANOMALY_CHECK_INTERVAL_SEC:.1f} seconds")
+    print("[*] Anomaly baseline: first 60s after connect/reconnect (espressif devices only)")
+    print("[*] Blocking policy: only device names containing 'espressif' can be blocked")
     print(f"[*] Ping probe config: count={PING_COUNT}, timeout={PING_TIMEOUT_SEC:.1f}s")
     print(f"[*] Logging raw packet output to '{LOG_FILE}'")
     print(f"[*] Packet logs to stdout: {'enabled' if SHOW_PACKET_LOGS else 'disabled'}")
@@ -1037,9 +1078,6 @@ def start_monitoring(supabase_writer):
                 else:
                     ja3_hash = ja3_raw
 
-                if ja3_hash:
-                    print(f"\n JA3 captured: {ja3_hash} from {mac_addr}")
-
                 message_type = parse_dhcp_message_type(
                     first_value(layers, "dhcp_option_dhcp", "dhcp_option_dhcp_message_type")
                 )
@@ -1060,6 +1098,8 @@ def start_monitoring(supabase_writer):
                     continue
 
                 normalized_mac = normalize_mac(mac_addr)
+                if ja3_hash:
+                    print(f"\n JA3 captured: {ja3_hash} from {normalized_mac}")
                 previous_snapshot = get_registry_snapshot_for_mac(normalized_mac)
                 previous_ip = str(previous_snapshot["ip"]) if previous_snapshot else "0.0.0.0"
                 previous_name = str(previous_snapshot["name"]) if previous_snapshot else "Unknown"
@@ -1135,8 +1175,5 @@ if __name__ == "__main__":
         SUPABASE_DEVICES_TABLE,
         SUPABASE_METRICS_TABLE
     )
-
-    # Sync baselines before starting packet capture
-    load_baselines(writer)
 
     start_monitoring(writer)

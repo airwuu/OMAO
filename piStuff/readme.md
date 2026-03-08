@@ -34,7 +34,6 @@ export SUPABASE_METRICS_TABLE="device_metrics"
 export DHCP_DUPLICATE_WINDOW_SEC="20"
 export DISCONNECT_TIMEOUT_SEC="15"
 export METRICS_SAMPLE_INTERVAL_SEC="5"
-export ANOMALY_CHECK_INTERVAL_SEC="10"
 export PING_COUNT="3"
 export PING_TIMEOUT_SEC="1"
 export SHOW_PACKET_LOGS="true"
@@ -47,7 +46,9 @@ Notes:
 - Devices are marked `disconnected` after `DISCONNECT_TIMEOUT_SEC` of inactivity.
 - Active ping probes generate the latency/packet-loss series shown in the dashboard at `METRICS_SAMPLE_INTERVAL_SEC`.
 - Passive traffic capture generates per-device `network_activity_kbps` so heavy internet usage is visible.
-- Traffic anomaly checks run at `ANOMALY_CHECK_INTERVAL_SEC` while keeping a 24-hour rolling baseline.
+- Traffic anomaly checks run every 60 seconds.
+- For devices whose names contain `espressif`, the first minute after connect/reconnect is used as the traffic baseline.
+- Only devices with names containing `espressif` are block-eligible. Non-espressif devices skip threat/anomaly blocking logic.
 
 ## 3) Run
 
@@ -65,5 +66,6 @@ On DHCP activity and metrics intervals:
 
 - Upsert `devices` by `id` (deterministic from MAC).
 - Insert periodic `device_metrics` rows with latency, packet loss, block events, and `network_activity_kbps`.
-- `status` is `blocked` when threat intel marks the device malicious, `good` when healthy, and `disconnected` after inactivity timeout.
+- `status` is `blocked` only for block-eligible (`espressif`) devices that trigger threat/anomaly rules, `good` when healthy, and `disconnected` after inactivity timeout.
 - Device IP is refreshed from DHCP/server response packets so `wlan0` clients do not stay at `0.0.0.0`.
+- Baseline fields (`traffic_baseline`, `avg_pkts_per_sec`) are update-only and will not create missing device rows.
