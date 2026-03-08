@@ -798,6 +798,8 @@ def start_monitoring(supabase_writer):
                 # --- 4. LOGGING ---
                 if ja3_hash:
                     print(f"[!] TLS HANDSHAKE: Captured JA3 for {normalized_mac}: {ja3_hash[:15]}...")
+                else: 
+                    print("[Debug] No JA3 Hash.")
                 
                 if SHOW_PACKET_LOGS and message_type in {1, 3, 5}:
                     log_packet_summary(data, layers, message_type, udp_dstport)
