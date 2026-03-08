@@ -99,10 +99,19 @@ def check_threat_intel(mac_addr, hostname):
 
 def isolate_device(mac_addr):
     """
-    Placeholder: Block the device using iptables or another method.
+    Blocks the device from communicating through the Pi using iptables.
     """
-    print(f"[!] ACTION TAKEN: Isolating device {mac_addr} from network.")
-    # Example: os.system(f"iptables -A FORWARD -m mac --mac-source {mac_addr} -j DROP")
+    print(f"[!] ACTION TAKEN: Cutting network access for {mac_addr}.")
+    try:
+        # This command drops any packet coming from this specific MAC address
+        subprocess.run([
+            "sudo", "iptables", "-A", "FORWARD", 
+            "-m", "mac", "--mac-source", mac_addr, 
+            "-j", "DROP"
+        ], check=True)
+        print(f"[*] iptables rule added: {mac_addr} is now isolated.")
+    except Exception as e:
+        print(f"[!] Failed to isolate device {mac_addr}: {e}")
 
 
 def required_env(name):
@@ -280,6 +289,25 @@ class SupabaseWriter:
     def upsert_device(self, device_id, mac_addr, hostname, ip_addr, status):
         timestamp = current_timestamp_utc()
         safe_hostname = fallback_device_name(hostname, mac_addr)
+
+        try:
+            # Look up the manufacturer (e.g., "Espressif Inc" or "Apple")
+            vendor = vendor_scanner.lookup(mac_addr)
+        except Exception:
+            vendor = "Unknown Vendor"
+
+        # Simple logic to determine the 'type'
+        v_lower = vendor.lower()
+        h_lower = safe_hostname.lower()
+        
+        if "espressif" in v_lower or "esp" in h_lower:
+            device_type = "smart_home"
+        elif "apple" in v_lower or "samsung" in v_lower or "mobile" in h_lower:
+            device_type = "mobile"
+        elif "raspberry" in v_lower:
+            device_type = "gateway"
+        else:
+            device_type = "iot"  # Default if we aren't sure
 
         device_row = [{
             "id": device_id,
