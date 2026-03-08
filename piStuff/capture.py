@@ -768,7 +768,7 @@ def start_monitoring(supabase_writer):
                 if ja3_hash:
                     print(f"[DEBUG] Captured JA3 Hash from {mac_addr}: {ja3_hash}") 
                 else: 
-                    print(f"[DEBUG] No JA3 hash captured from {mac_addr}")
+                    print(f"[DEBUG] No JA3 hash captured.")
                 
                 message_type = parse_dhcp_message_type(
                     first_value(layers, "dhcp_option_dhcp", "dhcp_option_dhcp_message_type")
