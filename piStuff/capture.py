@@ -765,8 +765,11 @@ def start_monitoring(supabase_writer):
 
                 # --- 1. EXTRACT JA3 ---
                 # Tshark JSON uses underscores for dots (tls.handshake.ja3 -> tls_handshake_ja3)
-                ja3_hash = first_value(layers, "tls_handshake_ja3")
-                
+                ja3_raw = layers.get("tls_handshake_ja3")
+                if isinstance(ja3_raw, list) and len(ja3_raw) > 0:
+                    ja3_hash = str(ja3_raw[0])
+                else:
+                    ja3_hash = ja3_raw                
                 # --- 2. PARSE DHCP ---
                 message_type = parse_dhcp_message_type(
                     first_value(layers, "dhcp_option_dhcp", "dhcp_option_dhcp_message_type")
@@ -780,9 +783,17 @@ def start_monitoring(supabase_writer):
 
                 # --- 3. FILTER PACKETS ---
                 # Only proceed if it's a DHCP event OR it contains a JA3 hash
-                if message_type not in {1, 3, 5} and not ja3_hash:
-                    continue
+                # Check for JA3 first, independent of DHCP
+                if ja3_hash:
+                    print(f"[*] TLS Handshake detected. Analyzing JA3: {ja3_hash[:10]}...")
+                    is_malicious = check_threat_intel(normalized_mac, hostname, ja3_hash)
+                    if is_malicious:
+                        isolate_device(normalized_mac)
 
+                # Proceed to DHCP logic if applicable
+                if message_type in {1, 3, 5}:
+                    handle_dhcp_presence(normalized_mac, hostname, ip_addr, message_type, supabase_writer, ja3_hash)
+                    
                 # --- 4. IDENTIFY DEVICE ---
                 mac_addr = first_value(layers, "dhcp_hw_mac_addr", "eth_src", "eth_dst")
                 if not mac_addr:
